@@ -27,9 +27,8 @@ matches are played through the [nobkonline.com](https://nobkonline.com) servers.
    username is your in-game name; matches, rating and stats are saved to it.
 7. **Sign in** on the launcher's **Online** tab with the same username and password and keep
    **Connect NOBK.Online services** ticked.
-8. **Play:** press **PLAY**, open **EA Sports Online** in the game and pick Ranked, Unranked
-   or Team Play. You are paired with whoever is searching (a search lasts 2 minutes).
-   Team Play / Be A Pro is still in testing: with 3 or more players the match may not start.
+8. **Play:** press **PLAY**, open **NOBK.Online** from the game's main menu and pick a
+   **ranked 1v1** match. You are paired with whoever is searching (a search lasts 2 minutes).
 
 The result shows up on the site and the leaderboard a few seconds after the match.
 

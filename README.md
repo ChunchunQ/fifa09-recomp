@@ -1,5 +1,3 @@
-<!-- banner: docs/images/banner.png -->
-
 # FIFA 09 PC
 
 [![Latest release](https://img.shields.io/github/v/release/ChunchunQ/fifa09-recomp?label=latest%20release)](https://github.com/ChunchunQ/fifa09-recomp/releases/latest)
@@ -10,6 +8,8 @@
 
 **[⬇ Download for Windows x64](https://github.com/ChunchunQ/fifa09-recomp/releases/latest)**
 
+![FIFA 09 running natively on PC](docs/images/match.jpg)
+
 The Xbox 360 game code is translated to native PC code with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 Online play runs on the free [NOBK.Online](https://nobkonline.com) servers.
 **No game files are included:** you need your own Xbox 360 copy of FIFA 09.
@@ -18,8 +18,8 @@ Online play runs on the free [NOBK.Online](https://nobkonline.com) servers.
 
 | | |
 |---|---|
-| **Native PC port** — no emulator, runs at full speed on everyday PCs | **Online again** — ranked and unranked 1v1 on NOBK.Online, with MMR, leagues, badges and monthly champions |
-| **720p / 1080p with AMD FSR** or native **2K / 4K**, window or fullscreen, any monitor | **Live match feed** — line-ups, goals and cards on [nobkonline.com](https://nobkonline.com) and on Discord |
+| **Native PC port** — no emulator, runs at full speed on everyday PCs | **Online again** — ranked 1v1 on NOBK.Online, with MMR, leagues, badges and monthly champions |
+| **720p / 1080p with AMD FSR** or native **2K / 4K**, window or fullscreen, any monitor | **Live match feed** — line-ups, goals and cards on [nobkonline.com](https://nobkonline.com) |
 | **Frame rate limit** up to unlimited (game speed is not affected) | **Controller or keyboard + mouse** — Xbox or PlayStation button prompts, rebindable keys, the pad works with the window in the background |
 | **Achievements** with Xbox 360-style pop-ups | **Launcher** — settings, file check, Add to Steam (Steam Deck too), self-update, one-click log upload |
 
@@ -27,12 +27,27 @@ Online play runs on the free [NOBK.Online](https://nobkonline.com) servers.
 
 1. Create a free account at [nobkonline.com](https://nobkonline.com/register/). Your username is your in-game name.
 2. Sign in on the launcher's **Online** tab.
-3. In the game open **EA Sports Online** and pick **Ranked**, **Unranked** or **Team Play**.
+3. In the game open **NOBK.Online** from the main menu and pick a **ranked 1v1** match.
 
 Results appear on the site and the leaderboard seconds after the final whistle. No port forwarding, no VPN.
 
-> [!IMPORTANT]
-> **Team Play / Be A Pro** is still being tested: the lobby works, matches with 3 or more players may not start yet.
+## The launcher
+
+![The launcher's Display page](docs/images/launcher.png)
+
+- **Online** — sign in with your NOBK.Online account
+- **Display** — 720p / 1080p with AMD FSR or native 2K / 4K, fullscreen or window, monitor, window size, frame rate limit (60 to unlimited)
+- **Graphics** — texture filtering, graphics API (Direct3D 12 recommended)
+- **Controls** — controller or keyboard + mouse, rebindable keys, Xbox or PlayStation button prompts
+- **Files** — game folder, verify game files, Add to Steam, send log
+- **Achievements** — everything you unlocked
+- English and Turkish, updates itself
+
+## In game
+
+![Main menu with the NOBK.Online entry](docs/images/menu.jpg)
+
+The main menu's **NOBK.Online** entry brings the online modes back.
 
 ## Which version you need
 
@@ -68,7 +83,6 @@ The launcher updates itself; your settings and sign-in are kept.
 
 ## Known issues
 
-- Short black screen (about 2 s) on some throw-in / corner camera cuts and sometimes in the Arena; the game keeps running.
 - Team Play / Be A Pro with 3+ players: the match may not start yet (being worked on).
 - "Quit to Desktop" is disabled for now; close the game with **Alt+F4**.
 
