@@ -8,7 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Fifa09Launcher</RootNamespace>
     <AssemblyName>FIFA09 Launcher</AssemblyName>
-    <Version>1.2.7</Version>
+    <Version>1.3.0</Version>
 
     <!-- Single self-contained exe: players do not need .NET installed. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

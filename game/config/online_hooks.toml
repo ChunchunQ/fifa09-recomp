@@ -589,3 +589,17 @@ address = 0x8287e16c
 name = "Tp_SkipRouteForPlayers"
 registers = ["r27", "r28", "r29"]
 jump_address_on_true = 0x8287e1e4
+
+# Font heap full (Be A Pro crash after a goal, 20 Oct): FontFusion alloc returned NULL and
+# sub_82425CD0 wrote its header to NULL+4. Give the block from the system heap instead.
+[[midasm_hook]]
+address = 0x82425d50
+name = "Font_AllocFallback"
+registers = ["r1", "r31"]
+
+# ...and its free: our blocks go back to the system heap, skipping the game's free.
+[[midasm_hook]]
+address = 0x82425cac
+name = "Font_FreeFallback"
+registers = ["r31"]
+jump_address_on_true = 0x82425cb8

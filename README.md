@@ -22,6 +22,7 @@ Online play runs on the free [NOBK.Online](https://nobkonline.com) servers.
 | **720p / 1080p with AMD FSR** or native **2K / 4K**, window or fullscreen, any monitor | **Live match feed** — line-ups, goals and cards on [nobkonline.com](https://nobkonline.com) |
 | **Frame rate limit** up to unlimited (game speed is not affected) | **Controller or keyboard + mouse** — Xbox or PlayStation button prompts, rebindable keys, the pad works with the window in the background |
 | **Achievements** with Xbox 360-style pop-ups | **Launcher** — settings, file check, Add to Steam (Steam Deck too), self-update, one-click log upload |
+| **Friends in game** — press **F1** (or hold **Back / Share**): your NOBK.Online friends, invites, join a friend's lobby, achievements, server status and notices | **NOBK.Online ad boards** around the pitch |
 
 ## Online on NOBK.Online
 
@@ -48,6 +49,12 @@ Results appear on the site and the leaderboard seconds after the final whistle. 
 ![Main menu with the NOBK.Online entry](docs/images/menu.jpg)
 
 The main menu's **NOBK.Online** entry brings the online modes back.
+
+Press **F1** (or hold **Back / Share** on the controller) anywhere in the game for the NOBK.Online panel:
+- **Friends** — who is online, in menus or in a match. Open a lobby with **Play a Friend** and invite them, or **join** a friend's open lobby directly. Invites arrive as a notification at the top right and never pause your game.
+- **Achievements** — progress and unlock dates (also on **F7**)
+- **Server** — players online, searching, live matches, your ping
+- **Notices** — messages from NOBK.Online (maintenance, events)
 
 ## Which version you need
 

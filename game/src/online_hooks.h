@@ -2276,3 +2276,59 @@ void Ui_NotifySelection(PPCRegister& r3, PPCRegister& r29, PPCRegister& r30, PPC
   if (uiquit::Trace())
     REXKRNL_INFO("[ui] NotifyMenuSelectionChange {} {} {}", int32_t(r3.u32), int32_t(r29.u32), int32_t(r30.u32));
 }
+
+// --- Font heap out of memory (Be A Pro crash, 20 Oct) -------------------------------
+// After a goal in a 2-player Be A Pro match FontSystem::InitializeInstance (0x82926078)
+// asked FontFusion for 148 bytes. FontFusion's allocator (sub_82425CD0, category
+// "FontFusion" / TLFontRendering) got NULL from its heap (the heap traps once: "trap
+// type 22") and wrote its header to NULL+4 -> crash. When that heap is full we give the
+// block from the kernel system heap instead, and the matching free (sub_82425C78)
+// returns those blocks to the system heap. NOBK_FONT_OOM_OFF=1 disables it.
+namespace fontoom {
+inline std::mutex mu;
+inline std::unordered_set<uint32_t> blocks;   // header addresses we handed out
+inline std::atomic<uint32_t> count{0}, bytes{0};
+inline bool Off() {
+  static const bool off = [] { const char* e = std::getenv("NOBK_FONT_OOM_OFF"); return e && *e == '1'; }();
+  return off;
+}
+}  // namespace fontoom
+
+// 0x82425d50: right after the allocator call; r1+96 = returned header, r31 = user size.
+void Font_AllocFallback(PPCRegister& r1, PPCRegister& r31) {
+  if (fontoom::Off()) return;
+  uint8_t* slot = REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(r1.u32 + 96);
+  if (!slot) return;
+  uint32_t got = (uint32_t(slot[0]) << 24) | (uint32_t(slot[1]) << 16) | (uint32_t(slot[2]) << 8) | slot[3];
+  if (got) return;
+  uint32_t want = r31.u32 + 12;
+  if (want < 16 || want > 64u * 1024 * 1024) return;
+  uint32_t a = REX_KERNEL_MEMORY()->SystemHeapAlloc(want, 0x20);
+  if (!a) {
+    REXKRNL_ERROR("[fontoom] fallback alloc of {} bytes failed too", want);
+    return;
+  }
+  if (uint8_t* p = REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(a)) std::memset(p, 0, want);
+  { std::lock_guard<std::mutex> l(fontoom::mu); fontoom::blocks.insert(a); }
+  slot[0] = uint8_t(a >> 24); slot[1] = uint8_t(a >> 16); slot[2] = uint8_t(a >> 8); slot[3] = uint8_t(a);
+  uint32_t n = ++fontoom::count;
+  fontoom::bytes += want;
+  if (n <= 10 || (n % 200) == 0)
+    REXKRNL_WARN("[fontoom] font heap full: {} bytes from the system heap at {:08X} (#{} , {} KB total)",
+                 want, a, n, fontoom::bytes.load() / 1024);
+}
+
+// 0x82425cac: free path, r31 = block header. Our blocks go back to the system heap and
+// skip the game's free (jump 0x82425cb8).
+bool Font_FreeFallback(PPCRegister& r31) {
+  if (fontoom::count.load() == 0) return false;
+  uint32_t h = r31.u32;
+  {
+    std::lock_guard<std::mutex> l(fontoom::mu);
+    auto it = fontoom::blocks.find(h);
+    if (it == fontoom::blocks.end()) return false;
+    fontoom::blocks.erase(it);
+  }
+  REX_KERNEL_MEMORY()->SystemHeapFree(h);
+  return true;
+}

@@ -36,13 +36,30 @@ public static class ModManager
             var big = Path.Combine(gameDir, archive + ".big");
             if (!File.Exists(big)) continue;
             var present = mods.Where(m => Directory.Exists(Path.Combine(modsDir, m, archive))).ToList();
-            SyncArchive(big, present.Select(m => Path.Combine(modsDir, m, archive)).ToList(),
-                        string.Join(",", present));
+            var dirs = present.Select(m => Path.Combine(modsDir, m, archive)).ToList();
+            // The content fingerprint makes an update with new mod files (same names and
+            // sizes, e.g. new ad boards) re-patch the archive once.
+            SyncArchive(big, dirs, dirs.Count == 0 ? "" : string.Join(",", present) + "#" + Fingerprint(dirs));
         }
 
         var locale = Path.Combine(gameDir, "data", "loc", "locale.big");
         ReplaceLocale(locale, Path.Combine(modsDir, "nobk_text", "locale.big"));
         DisableLanguageSelect(locale);
+    }
+
+    static string Fingerprint(List<string> dirs)
+    {
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        foreach (var dir in dirs)
+            foreach (var file in Directory.GetFiles(dir, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal))
+            {
+                var name = Encoding.UTF8.GetBytes(Path.GetRelativePath(dir, file).Replace('\\', '/') + "\n");
+                sha.TransformBlock(name, 0, name.Length, null, 0);
+                var data = File.ReadAllBytes(file);
+                sha.TransformBlock(data, 0, data.Length, null, 0);
+            }
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        return Convert.ToHexString(sha.Hash!).Substring(0, 12);
     }
 
     // The original locale.big of the supported game version (4360448 bytes).
