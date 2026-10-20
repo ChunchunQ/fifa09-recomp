@@ -100,6 +100,7 @@ Found a bug? Press **Files → Send log** in the launcher, or open a ticket at
 
 The code written for this port (game hooks, launcher, SDK patches, tools) is in this repository (`game/`, `launcher/`, `patches/`, `tools/`), under the [MIT license](LICENSE).
 Build steps: [BUILDING.md](BUILDING.md). The game itself and the code generated from it are not included.
+How the online part works, for other Xbox 360 recomp projects: [docs/ONLINE.md](docs/ONLINE.md).
 
 ## Credits
 
