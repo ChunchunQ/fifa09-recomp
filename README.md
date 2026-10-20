@@ -89,6 +89,11 @@ The launcher updates itself; your settings and sign-in are kept.
 Found a bug? Press **Files → Send log** in the launcher, or open a ticket at
 [nobkonline.com → Account → Report a problem](https://nobkonline.com/account/#support).
 
+## Source code
+
+The code written for this port (game hooks, launcher, SDK patches, tools) is in [`source/`](source/), under the MIT license.
+Build steps: [source/README.md](source/README.md). The game itself and the code generated from it are not included.
+
 ## Credits
 
 - **EA Canada** for FIFA 09, and **Electronic Arts**
@@ -100,5 +105,5 @@ Found a bug? Press **Files → Send log** in the launcher, or open a ticket at
 
 This is a free, non-profit fan project. It is not affiliated with, endorsed or sponsored by Electronic Arts,
 EA Sports, FIFA or Microsoft. FIFA 09 and all related names, logos and artwork belong to their respective owners.
-This repository contains no game files. You must own the game to use the port.
+This repository contains no game files and no code generated from the game. You must own the game to use the port.
 **Please do not open issues asking for game files.** Rights holders: open an issue and we will act on it promptly.

@@ -1,0 +1,26 @@
+From ad387e2d08e82a301f32d50a143dbbec372c2120 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 14:43:47 +0300
+Subject: [PATCH] local: XamAlloc flags
+
+---
+ src/kernel/xam/xam_info.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/kernel/xam/xam_info.cpp b/src/kernel/xam/xam_info.cpp
+index 1fda053..29ad9ff 100644
+--- a/src/kernel/xam/xam_info.cpp
++++ b/src/kernel/xam/xam_info.cpp
+@@ -294,7 +294,8 @@ void XamLoaderTerminateTitle_entry() {
+ }
+ 
+ u32 XamAlloc_entry(u32 unk, u32 size, mapped_u32 out_ptr) {
+-  assert_true(unk == 0);
++  // unk carries allocation flags (FIFA 09 passes 0x18000000 for its online
++  // buffers); they are not needed for the system heap.
+ 
+   // Allocate from the heap. Not sure why XAM does this specially, perhaps
+   // it keeps stuff in a separate heap?
+-- 
+2.43.0
+

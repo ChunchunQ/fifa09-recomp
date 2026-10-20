@@ -1,0 +1,946 @@
+From 5fba1af9bc572fcb6527ea9209d4dd1fd45961ef Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 12:15:16 +0300
+Subject: [PATCH] local: online revival-server support
+
+---
+ src/kernel/xam/apps/xlivebase_app.cpp |  47 ++-
+ src/kernel/xam/xam_misc.cpp           |   2 +-
+ src/kernel/xam/xam_net.cpp            | 575 ++++++++++++++++++++++++--
+ src/kernel/xam/xam_user.cpp           |   6 +-
+ 4 files changed, 598 insertions(+), 32 deletions(-)
+
+diff --git a/src/kernel/xam/apps/xlivebase_app.cpp b/src/kernel/xam/apps/xlivebase_app.cpp
+index 3593403..4fe12c6 100644
+--- a/src/kernel/xam/apps/xlivebase_app.cpp
++++ b/src/kernel/xam/apps/xlivebase_app.cpp
+@@ -9,6 +9,10 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <cstdio>
++#include <cstring>
++
++#include <rex/cvar.h>
+ #include <rex/kernel/xam/apps/xlivebase_app.h>
+ #include <rex/logging.h>
+ #include <rex/thread.h>
+@@ -29,6 +33,10 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message, uint32_t buffer_pt
+                                             uint32_t buffer_length) {
+   // NOTE: buffer_length may be zero or valid.
+   auto buffer = memory_->TranslateVirtual(buffer_ptr);
++  if (rex::cvar::Query<bool>("net_packet_log")) {
++    REXKRNL_INFO("[xlive-trace] XLIVEBASE msg={:08X} buf={:08X} len={:08X}", message, buffer_ptr,
++                 buffer_length);
++  }
+   switch (message) {
+     case 0x00058004: {
+       // Called on startup, seems to just return a bool in the buffer.
+@@ -47,8 +55,43 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message, uint32_t buffer_pt
+       // Occurs if title calls XOnlineGetServiceInfo, expects dwServiceId
+       // and pServiceInfo. pServiceInfo should contain pointer to
+       // XONLINE_SERVICE_INFO structure.
+-      REXKRNL_DEBUG("CXLiveLogon::GetServiceInfo({:08X}, {:08X})", buffer_ptr, buffer_length);
+-      return 0x80151802;  // ERROR_CONNECTION_INVALID
++      // [online] XOnlineGetServiceInfo(dwServiceId, XONLINE_SERVICE_INFO*):
++      // with online_enabled, answer with the revival server
++      // { DWORD dwServiceId; IN_ADDR inaServer; WORD wPort; WORD wReserved; }.
++      const uint32_t service_id = buffer_ptr;
++      const uint32_t out_guest = buffer_length;
++      if (!rex::cvar::Query<bool>("online_enabled")) {
++        REXKRNL_DEBUG("CXLiveLogon::GetServiceInfo({:08X}, {:08X})", buffer_ptr, buffer_length);
++        return 0x80151802;  // ERROR_CONNECTION_INVALID
++      }
++      unsigned a = 127, b = 0, c = 0, d = 1;
++      const std::string ip = rex::cvar::Query<std::string>("online_server_ip");
++      std::sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d);
++      const uint16_t port =
++          static_cast<uint16_t>(rex::cvar::Query<uint32_t>("online_server_port"));
++      bool wrote = false;
++      if (out_guest >= 0x1000u && out_guest < 0xC0000000u) {
++        if (auto out = memory_->TranslateVirtual(out_guest)) {
++          const uint8_t ipbytes[4] = {uint8_t(a), uint8_t(b), uint8_t(c), uint8_t(d)};
++          memory::store_and_swap<uint32_t>(out + 0, service_id);
++          std::memcpy(out + 4, ipbytes, 4);
++          memory::store_and_swap<uint16_t>(out + 8, port);
++          memory::store_and_swap<uint16_t>(out + 10, 0);
++          wrote = true;
++        }
++      }
++      REXKRNL_INFO("[online] GetServiceInfo service={:08X} -> {}.{}.{}.{}:{} wrote={}", service_id,
++                   a, b, c, d, port, wrote);
++      return X_E_SUCCESS;
++    }
++    case 0x00058009: {
++      // [online] Unidentified LIVE logon selector; EA clients block on it.
++      // Zero the output and report success.
++      REXKRNL_DEBUG("XLiveBase58009({:08X}, {:08X}) -> SUCCESS/empty", buffer_ptr, buffer_length);
++      if (buffer && buffer_length > 0) {
++        std::memset(buffer, 0, buffer_length);
++      }
++      return X_E_SUCCESS;
+     }
+     case 0x00058020: {
+       // 0x00058004 is called right before this.
+diff --git a/src/kernel/xam/xam_misc.cpp b/src/kernel/xam/xam_misc.cpp
+index ff6cb56..fb8d525 100644
+--- a/src/kernel/xam/xam_misc.cpp
++++ b/src/kernel/xam/xam_misc.cpp
+@@ -243,7 +243,7 @@ REX_EXPORT_STUB(__imp__XNetLogonGetServiceInfo);
+ REX_EXPORT_STUB(__imp__XNetLogonGetServiceNetworkID);
+ REX_EXPORT_STUB(__imp__XNetLogonGetState);
+ REX_EXPORT_STUB(__imp__XNetLogonGetTicketOpt);
+-REX_EXPORT_STUB(__imp__XNetLogonGetTitleID);
++// XNetLogonGetTitleID is implemented in xam_net.cpp.
+ REX_EXPORT_STUB(__imp__XNetLogonGetTitleVersion);
+ REX_EXPORT_STUB(__imp__XNetLogonGetUserPrivileges);
+ REX_EXPORT_STUB(__imp__XNetLogonInitOverrideInfo);
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 58e36a4..49fe218 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -12,6 +12,7 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <cstdio>
+ #include <cstring>
+ 
+ #if REX_PLATFORM_MAC
+@@ -19,6 +20,7 @@
+ #endif
+ 
+ #include <rex/chrono/clock.h>
++#include <rex/cvar.h>
+ #include <rex/kernel/xam/module.h>
+ #include <rex/kernel/xam/private.h>
+ #include <rex/kernel/xboxkrnl/error.h>
+@@ -33,6 +35,30 @@
+ #include <rex/system/xthread.h>
+ #include <rex/system/xtypes.h>
+ 
++// [online] Revival-server support for EA Blaze titles (adapted from the Skate 3
++// recompilation's online layer, DonaldDuck979/rexglue-skate3, BSD 3-Clause).
++// With online_enabled the console reports a working LIVE connection and every
++// EA/LIVE server lookup resolves to online_server_ip, so the game's own online
++// client talks to a self-hosted server. Off by default: nothing changes.
++REXCVAR_DEFINE_BOOL(online_enabled, false, "Net",
++                    "Report an online connection and send the game's EA/LIVE server "
++                    "lookups to online_server_ip (revival server)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(online_server_ip, "127.0.0.1", "Net",
++                      "IPv4 address of the revival server (Blaze)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_UINT32(online_server_port, 42127, "Net",
++                      "Port handed to the game in XOnlineGetServiceInfo")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(online_public_ip, "", "Net",
++                      "Address reported as this console's public IP (XNADDR inaOnline); "
++                      "empty = the local IP")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(net_packet_log, false, "Net",
++                    "Log every socket call, DNS lookup and XLIVEBASE message the game "
++                    "makes (destination, length, first 16 bytes)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ #if REX_PLATFORM_WIN32
+ // NOTE: must be included last as it expects windows.h to already be included.
+ #define _WINSOCK_DEPRECATED_NO_WARNINGS  // inet_addr
+@@ -50,6 +76,64 @@ namespace xam {
+ using namespace rex::system;
+ using namespace rex::system::xam;
+ 
++// [online] Packet-log helpers. Format sockaddr fields safely regardless
++// of rex::be's implicit-conversion behavior by extracting raw bytes (sin_addr
++// and sin_port are always stored network byte order per XSOCKADDR_IN's comment).
++static void FormatSockaddr(const N_XSOCKADDR_IN* sa, char* out, size_t out_sz) {
++  if (!sa) { std::snprintf(out, out_sz, "?"); return; }
++  const uint8_t* ab = reinterpret_cast<const uint8_t*>(&sa->sin_addr);
++  const uint8_t* pb = reinterpret_cast<const uint8_t*>(&sa->sin_port);
++  const uint16_t port = (uint16_t(pb[0]) << 8) | uint16_t(pb[1]);
++  std::snprintf(out, out_sz, "%u.%u.%u.%u:%u",
++                ab[0], ab[1], ab[2], ab[3], port);
++}
++// First 16 bytes of a payload as hex, for quick fingerprinting of packets.
++static void FormatHexPeek(const void* data, size_t len, char* out, size_t out_sz) {
++  const uint8_t* p = static_cast<const uint8_t*>(data);
++  const size_t n = std::min<size_t>(len, 16);
++  size_t off = 0;
++  for (size_t i = 0; i < n && off + 3 < out_sz; ++i) {
++    off += std::snprintf(out + off, out_sz - off, "%02x ", p[i]);
++  }
++  if (off > 0 && out[off - 1] == ' ') out[off - 1] = 0;
++  else if (off < out_sz) out[off] = 0;
++}
++static inline bool PacketLogEnabled() {
++  return REXCVAR_GET(net_packet_log);
++}
++
++// [online] Best-effort primary outbound local IPv4, in network byte
++// order. Opens a UDP socket and "connects" it toward a public address (UDP
++// connect sends nothing -- it just makes the OS pick the default-route
++// interface), then reads back which local address that is. Falls back to
++// loopback. Windows-only (this file's winsock path is Win32); other platforms
++// return loopback.
++static uint32_t PrimaryLocalIPv4NBO() {
++#if REX_PLATFORM_WIN32
++  SOCKET s = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
++  if (s == INVALID_SOCKET) {
++    return htonl(INADDR_LOOPBACK);
++  }
++  sockaddr_in probe = {};
++  probe.sin_family = AF_INET;
++  probe.sin_port = htons(53);
++  probe.sin_addr.s_addr = inet_addr("8.8.8.8");
++  uint32_t ip = htonl(INADDR_LOOPBACK);
++  if (::connect(s, reinterpret_cast<sockaddr*>(&probe), sizeof(probe)) == 0) {
++    sockaddr_in local = {};
++    int len = static_cast<int>(sizeof(local));
++    if (::getsockname(s, reinterpret_cast<sockaddr*>(&local), &len) == 0 &&
++        local.sin_addr.s_addr != 0) {
++      ip = local.sin_addr.s_addr;  // already network byte order.
++    }
++  }
++  ::closesocket(s);
++  return ip;
++#else
++  return htonl(INADDR_LOOPBACK);
++#endif
++}
++
+ // https://github.com/G91/TitanOffLine/blob/1e692d9bb9dfac386d08045ccdadf4ae3227bb5e/xkelib/xam/xamNet.h
+ enum {
+   XNCALLER_INVALID = 0x0,
+@@ -183,6 +267,9 @@ struct XNetStartupParams {
+ XNetStartupParams xnet_startup_params = {};
+ 
+ u32 NetDll_XNetStartup_entry(u32 caller, ppc_ptr_t<XNetStartupParams> params) {
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] XNetStartup caller={}", caller);
++  }
+   if (params) {
+     assert_true(params->cfgSizeOfStruct == sizeof(XNetStartupParams));
+     std::memcpy(&xnet_startup_params, params, sizeof(XNetStartupParams));
+@@ -292,7 +379,11 @@ u32 NetDll_WSACleanup_entry(u32 caller) {
+ }
+ 
+ u32 NetDll_WSAGetLastError_entry() {
+-  return XThread::GetLastError();
++  uint32_t e = XThread::GetLastError();
++  if (PacketLogEnabled() && e != 0) {
++    REXKRNL_INFO("[net-pkt] WSAGetLastError -> {:#x}", e);
++  }
++  return e;
+ }
+ 
+ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
+@@ -436,27 +527,67 @@ struct XnAddrStatus {
+ };
+ 
+ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+-  // Just return a loopback address atm.
+-  addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
+-  addr_ptr->inaOnline.s_addr = 0;
+-  addr_ptr->wPortOnline = 0;
++  // Default (shipping) behavior: report loopback with NO online presence, so
++  // the game stays quietly offline and doesn't try to reach EA Nation (which
++  // dead-ends at EA's console-cert auth). Our own netplay is the online path.
++  // The EA-Nation experiment path below only runs under online_enabled.
++  if (!REXCVAR_GET(online_enabled)) {
++    addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
++    addr_ptr->inaOnline.s_addr = 0;
++    addr_ptr->wPortOnline = 0;
++    std::memset(addr_ptr->abEnet, 0xCC, 6);   // non-zero MAC (RakNet needs it).
++    std::memset(addr_ptr->abOnline, 0, 20);
++    return XnAddrStatus::XNET_GET_XNADDR_STATIC;
++  }
++
++  // [online] EXPERIMENTAL: report a REAL online presence so the game
++  // stops polling "am I online?" and proceeds to actually connect to EA Nation.
++  //   ina         = this machine's real local IPv4 (a bindable local interface;
++  //                 must NOT be a remote/VPS address or the game may fail to
++  //                 bind a socket to it).
++  //   inaOnline   = a public IP (online_public_ip cvar) = this
++  //                 console's address as the outside world sees it. Falls back
++  //                 to the local IP when the cvar is empty/unparseable.
++  //   wPortOnline = a non-zero online port (assigned as a plain host value; the
++  //                 guest reads XNADDR big-endian, so a small value is fine).
++  //   status now includes XNET_GET_XNADDR_ONLINE so the poll resolves "online".
++  const uint32_t local_ip = PrimaryLocalIPv4NBO();
++  uint32_t online_ip = local_ip;
++  const std::string online_ip_str =
++      rex::cvar::Query<std::string>("online_public_ip");
++  if (!online_ip_str.empty()) {
++    const uint32_t parsed = inet_addr(online_ip_str.c_str());
++    if (parsed != INADDR_NONE) {
++      online_ip = parsed;  // network byte order.
++    }
++  }
++  addr_ptr->ina.s_addr = local_ip;
++  addr_ptr->inaOnline.s_addr = online_ip;
++  addr_ptr->wPortOnline = 34643;  // plain value; guest reads big-endian.
+ 
+   // TODO(gibbed): A proper mac address.
+   // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
+-  // numbers. A zero value will cause RakPeer::Startup to fail. This causes
+-  // 58411436 to crash on startup.
+-  // The 360-specific code is scrubbed from the RakNet repo, but there's still
+-  // traces of what it's doing which match the game code.
+-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L382
+-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4527
+-  // https://github.com/facebookarchive/RakNet/blob/master/Source/RakPeer.cpp#L4467
+-  // "Mac address is a poor solution because you can't have multiple connections
+-  // from the same system"
++  // numbers. A zero value will cause RakPeer::Startup to fail.
+   std::memset(addr_ptr->abEnet, 0xCC, 6);
+-
+   std::memset(addr_ptr->abOnline, 0, 20);
+ 
+-  return XnAddrStatus::XNET_GET_XNADDR_STATIC;
++  // Rate-limited: the game may poll this many times; log the first call and
++  // then sparsely, so the EA-connection packets we care about aren't buried.
++  static uint32_t s_xnaddr_calls = 0;
++  if (PacketLogEnabled() && (s_xnaddr_calls++ % 500) == 0) {
++    const uint8_t* lb = reinterpret_cast<const uint8_t*>(&local_ip);
++    const uint8_t* ob = reinterpret_cast<const uint8_t*>(&online_ip);
++    REXKRNL_INFO(
++        "[net-pkt] XNetGetTitleXnAddr caller={} #{} local={}.{}.{}.{} "
++        "online={}.{}.{}.{}:34643 status=STATIC|GATEWAY|DNS|ONLINE",
++        caller, s_xnaddr_calls, lb[0], lb[1], lb[2], lb[3],
++        ob[0], ob[1], ob[2], ob[3]);
++  }
++
++  return XnAddrStatus::XNET_GET_XNADDR_STATIC |
++         XnAddrStatus::XNET_GET_XNADDR_GATEWAY |
++         XnAddrStatus::XNET_GET_XNADDR_DNS |
++         XnAddrStatus::XNET_GET_XNADDR_ONLINE;
+ }
+ 
+ u32 NetDll_XNetGetDebugXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+@@ -476,13 +607,71 @@ void NetDll_XNetInAddrToString_entry(u32 caller, u32 in_addr, mapped_string stri
+   rex::string::copy_truncating(string_out, "666.666.666.666", string_size);
+ }
+ 
++// [online] Parse online_server_ip to a network-byte-order IPv4;
++// fall back to loopback. inet_addr already returns network byte order.
++static uint32_t BlazeRedirectNBO() {
++  const std::string ip = rex::cvar::Query<std::string>("online_server_ip");
++  if (!ip.empty()) {
++    const uint32_t parsed = inet_addr(ip.c_str());
++    if (parsed != INADDR_NONE) {
++      return parsed;
++    }
++  }
++  return htonl(INADDR_LOOPBACK);
++}
++
+ // This converts a XNet address to an IN_ADDR. The IN_ADDR is used for
+ // subsequent socket calls (like a handle to a XNet address)
+ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mapped_void xid,
+                                     mapped_void in_addr) {
++  // [online] REDIRECT: when we're online-for-real, resolve every XNet
++  // address to our own Blaze server IP so the game connects to US, not EA. The
++  // original stub returned 1 = failure, which is what made the EA client give up
++  // with "EA server is not available" before ever opening a socket.
++  if (REXCVAR_GET(online_enabled)) {
++    const uint32_t redirect = BlazeRedirectNBO();
++    if (in_addr) {
++      std::memcpy(in_addr.host_address(), &redirect, sizeof(redirect));
++    }
++    if (PacketLogEnabled()) {
++      const uint8_t* rb = reinterpret_cast<const uint8_t*>(&redirect);
++      REXKRNL_INFO("[net-pkt] XNetXnAddrToInAddr caller={} -> redirect={}.{}.{}.{} (ret=0)",
++                   caller, rb[0], rb[1], rb[2], rb[3]);
++    }
++    return 0;  // success
++  }
+   return 1;
+ }
+ 
++// [online] EA's Blaze client resolves the EA server address through
++// this Xbox secure-server resolver -- NOT plain DNS (which is why the recon run
++// logged zero DnsLookup calls). It was a bare stub, so the game got no address
++// and showed "The EA server is not available" before opening any socket.
++// Redirect it to our own Blaze server IP so the game proceeds to actually
++// connect to US; our socket/connect logging then reveals the port + protocol.
++// Args are logged RAW (hex) because XNetServerToInAddr has no prototype in-tree;
++// the documented 360 ABI is (const IN_ADDR ina, DWORD dwServiceId, IN_ADDR* pina)
++// under this SDK's leading-`caller` convention -- the log confirms/corrects it.
++u32 NetDll_XNetServerToInAddr_entry(u32 caller, u32 server_ina, u32 service_id,
++                                    mapped_void in_addr) {
++  if (!REXCVAR_GET(online_enabled)) {
++    return 1;  // offline: behave like the old failing stub.
++  }
++  const uint32_t redirect = BlazeRedirectNBO();
++  if (in_addr) {
++    std::memcpy(in_addr.host_address(), &redirect, sizeof(redirect));
++  }
++  if (PacketLogEnabled()) {
++    const uint8_t* rb = reinterpret_cast<const uint8_t*>(&redirect);
++    REXKRNL_INFO(
++        "[net-pkt] XNetServerToInAddr caller={} arg_ina={:#x} service_id={:#x} "
++        "out_ptr={:#x} -> redirect={}.{}.{}.{} (ret=0)",
++        caller, server_ina, service_id, in_addr.guest_address(),
++        rb[0], rb[1], rb[2], rb[3]);
++  }
++  return 0;  // success
++}
++
+ // Does the reverse of the above.
+ // FIXME: Arguments may not be correct.
+ u32 NetDll_XNetInAddrToXnAddr_entry(u32 caller, mapped_void in_addr, ppc_ptr_t<XNADDR> xn_addr,
+@@ -496,6 +685,41 @@ u32 NetDll_XNetSetSystemLinkPort_entry(u32 caller, u32 port) {
+   return 1;
+ }
+ 
++// [online] XNet secure-connection status values (XNetGetConnectStatus).
++struct XConnectStatus {
++  static const uint32_t XNET_CONNECT_STATUS_IDLE = 0;
++  static const uint32_t XNET_CONNECT_STATUS_PENDING = 1;
++  static const uint32_t XNET_CONNECT_STATUS_CONNECTED = 2;
++  static const uint32_t XNET_CONNECT_STATUS_LOST = 3;
++};
++
++// [online] After GetServiceInfo (xlivebase_app.cpp msg 0x58007) hands
++// the game our server address, the EA client calls XNetConnect(ina) to bring up
++// a "secure" link, then polls XNetGetConnectStatus until CONNECTED. Both were
++// stubs, so the game spun on XNetGetConnectStatus forever (6000+ polls) and never
++// opened a socket. We don't implement real XNet secure networking -- just report
++// the link established so the game proceeds to open its game socket and speak
++// Blaze to our server (which our socket/connect/sendto logging then reveals).
++u32 NetDll_XNetConnect_entry(u32 caller, u32 ina) {
++  if (PacketLogEnabled()) {
++    const uint8_t* ab = reinterpret_cast<const uint8_t*>(&ina);
++    REXKRNL_INFO("[net-pkt] XNetConnect caller={} ina={}.{}.{}.{} -> ok",
++                 caller, ab[0], ab[1], ab[2], ab[3]);
++  }
++  return 0;  // success -- connection initiated.
++}
++
++u32 NetDll_XNetGetConnectStatus_entry(u32 caller, u32 ina) {
++  if (REXCVAR_GET(online_enabled)) {
++    static uint32_t s_calls = 0;
++    if (PacketLogEnabled() && (s_calls++ % 500) == 0) {
++      REXKRNL_INFO("[net-pkt] XNetGetConnectStatus caller={} #{} -> CONNECTED", caller, s_calls);
++    }
++    return XConnectStatus::XNET_CONNECT_STATUS_CONNECTED;
++  }
++  return XConnectStatus::XNET_CONNECT_STATUS_IDLE;
++}
++
+ // https://github.com/ILOVEPIE/Cxbx-Reloaded/blob/master/src/CxbxKrnl/EmuXOnline.h#L39
+ struct XEthernetStatus {
+   static const uint32_t XNET_ETHERNET_LINK_ACTIVE = 0x01;
+@@ -506,15 +730,71 @@ struct XEthernetStatus {
+ };
+ 
+ u32 NetDll_XNetGetEthernetLinkStatus_entry(u32 caller) {
++  // [online] When we're reporting a real online presence (Blaze
++  // revival path), the game's "do I have an internet connection?" gate checks
++  // this. Returning 0 (no link) makes it show "you need an internet connection"
++  // even though XNetGetTitleXnAddr says ONLINE. Report an ACTIVE 100Mbps
++  // full-duplex link so that gate passes. Shipping behavior (cvar OFF) is
++  // unchanged: report no link so the game stays quietly offline on our relay.
++  if (REXCVAR_GET(online_enabled)) {
++    return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE |
++           XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
++           XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
++  }
+   return 0;
+ }
+ 
++// [online] The EA Nation revival redirect points the game's service
++// lookups at our Blaze server. But CONTENT downloads (the Title Update, DLC
++// parks) are served by EA's download CDN (downloads.skate.online.ea.com), NOT
++// the Blaze server. Redirecting those to our server makes the install-time
++// title-update download hit a box that can't serve it -> HTTP 502 -> failed
++// install. Keep content-download hosts OUT of the redirect so they don't get
++// pointed at the Blaze server.
++static bool HostIsContentDownload(mapped_string host) {
++  if (!host) return false;
++  const char* h = host.host_address();
++  if (!h) return false;
++  auto lc = [](char c) -> char {
++    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
++  };
++  static const char kNeedle[] = "download";  // downloads.skate.online.ea.com
++  for (const char* p = h; *p; ++p) {
++    size_t i = 0;
++    while (kNeedle[i] && lc(p[i]) == kNeedle[i]) ++i;
++    if (kNeedle[i] == '\0') return true;
++  }
++  return false;
++}
++
+ u32 NetDll_XNetDnsLookup_entry(u32 caller, mapped_string host, u32 event_handle, mapped_u32 pdns) {
+-  // TODO(gibbed): actually implement this
++  if (PacketLogEnabled()) {
++    // `host` is a guest string; log whatever hostname the game asked for --
++    // often EA / Xbox LIVE FQDNs (e.g. easo.ea.com, xboxlive.com, xhttp.msft.net).
++    // Even though the lookup is stubbed, this reveals the game's INTENT.
++    const char* h = host ? host.host_address() : "(null)";
++    REXKRNL_INFO("[net-pkt] DnsLookup host='{}' event={}", h, event_handle);
++  }
+   if (pdns) {
+     auto dns_guest = REX_KERNEL_MEMORY()->SystemHeapAlloc(sizeof(XNDNS));
+     auto dns = REX_KERNEL_MEMORY()->TranslateVirtual<XNDNS*>(dns_guest);
+-    dns->status = 1;  // non-zero = error
++    // [online] Resolve EVERY hostname to our own revival server IP so
++    // the game's web/feed/EA services (e.g. 'skate3_web', downloads.skate.online.
++    // ea.com) reach our server on the same box instead of failing (a failed
++    // lookup made the game connect to 255.255.255.255 and show "EA server not
++    // available"). Only when online-for-real; otherwise report a lookup failure.
++    if (REXCVAR_GET(online_enabled) && !HostIsContentDownload(host)) {
++      dns->status = 0;  // success
++      dns->cina = 1;    // one address
++      dns->aina[0].s_addr = BlazeRedirectNBO();  // our server IP (network order)
++    } else {
++      // Offline, or a content/title-update download host (see
++      // HostIsContentDownload): report a lookup failure instead of pointing it
++      // at our Blaze server, which is not EA's content CDN. This keeps the
++      // install-time title-update download from hitting the Blaze box (HTTP 502).
++      dns->status = 1;  // non-zero = error
++      dns->cina = 0;
++    }
+     *pdns = dns_guest;
+   }
+   if (event_handle) {
+@@ -534,12 +814,33 @@ u32 NetDll_XNetDnsRelease_entry(u32 caller, ppc_ptr_t<XNDNS> dns) {
+ }
+ 
+ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, mapped_u32 pqos) {
+-  // Set pqos as some games will try accessing it despite non-successful result
+-  if (pqos) {
++  // [online] Report a HEALTHY, COMPLETE QoS probe so the game believes
++  // it has a good internet connection (open NAT, low latency, high bandwidth).
++  // The old stub returned 0 probes -> the game concluded it had no usable internet
++  // and fell back to "you have lost your connection to EA Nation".
++  if (pqos && !REXCVAR_GET(online_enabled)) {
++    // Offline: no probes (some games read pqos even on failure).
+     auto qos_guest = REX_KERNEL_MEMORY()->SystemHeapAlloc(sizeof(XNQOS));
+     auto qos = REX_KERNEL_MEMORY()->TranslateVirtual<XNQOS*>(qos_guest);
+     qos->count = qos->count_pending = 0;
+     *pqos = qos_guest;
++  } else if (pqos) {
++    auto qos_guest = REX_KERNEL_MEMORY()->SystemHeapAlloc(sizeof(XNQOS));
++    auto qos = REX_KERNEL_MEMORY()->TranslateVirtual<XNQOS*>(qos_guest);
++    qos->count = 1;
++    qos->count_pending = 0;  // 0 pending == fully complete
++    XNQOSINFO& q = qos->info[0];
++    q.flags = 0x0B;  // COMPLETE | TARGET_CONTACTED | DATA_RECEIVED
++    q.reserved = 0;
++    q.probes_xmit = 4;
++    q.probes_recv = 4;  // all probes answered
++    q.data_len = 0;
++    q.data_ptr = 0;
++    q.rtt_min_in_msecs = 10;
++    q.rtt_med_in_msecs = 15;
++    q.up_bits_per_sec = 10000000;    // 10 Mbps up
++    q.down_bits_per_sec = 10000000;  // 10 Mbps down
++    *pqos = qos_guest;
+   }
+   if (event_handle) {
+     auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(event_handle);
+@@ -559,7 +860,10 @@ u32 NetDll_XNetQosRelease_entry(u32 caller, ppc_ptr_t<XNQOS> qos) {
+ 
+ u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32 data_size, u32 r7,
+                                u32 flags) {
+-  return X_ERROR_FUNCTION_FAILED;
++  // [online] Report success so the game can register as a QoS host
++  // (was FUNCTION_FAILED, which could make the game consider itself unable to
++  // host / verify connectivity). No real UDP QoS listener is set up yet.
++  return REXCVAR_GET(online_enabled) ? 0 : X_ERROR_FUNCTION_FAILED;
+ }
+ 
+ u32 NetDll_inet_addr_entry(mapped_string addr_ptr) {
+@@ -589,9 +893,17 @@ u32 NetDll_socket_entry(u32 caller, u32 af, u32 type, u32 protocol) {
+ 
+     uint32_t error = xboxkrnl::xeRtlNtStatusToDosError(result);
+     XThread::SetLastError(error);
++    if (PacketLogEnabled()) {
++      REXKRNL_INFO("[net-pkt] socket af={} type={} proto={} -> FAILED err={:#x}",
++                   af, type, protocol, error);
++    }
+     return -1;
+   }
+ 
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] socket af={} type={} proto={} -> handle={}",
++                 af, type, protocol, socket->handle());
++  }
+   return socket->handle();
+ }
+ 
+@@ -603,6 +915,9 @@ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
+     return -1;
+   }
+ 
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] closesocket sock={}", socket_handle);
++  }
+   // TODO: Absolutely delete this object. It is no longer valid after calling
+   // closesocket.
+   socket->Close();
+@@ -618,6 +933,9 @@ i32 NetDll_shutdown_entry(u32 caller, u32 socket_handle, i32 how) {
+     return -1;
+   }
+ 
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] shutdown sock={} how={}", socket_handle, how);
++  }
+   auto ret = socket->Shutdown(how);
+   if (ret == -1) {
+ #if REX_PLATFORM_WIN32
+@@ -639,6 +957,10 @@ u32 NetDll_setsockopt_entry(u32 caller, u32 socket_handle, u32 level, u32 optnam
+     return -1;
+   }
+ 
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] setsockopt sock={} level={:#x} optname={:#x} optlen={}",
++                 socket_handle, level, optname, optlen);
++  }
+   X_STATUS status = socket->SetOption(level, optname, optval_ptr, optlen);
+   return XSUCCEEDED(status) ? 0 : -1;
+ }
+@@ -651,6 +973,9 @@ u32 NetDll_ioctlsocket_entry(u32 caller, u32 socket_handle, u32 cmd, mapped_void
+     return -1;
+   }
+ 
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] ioctlsocket sock={} cmd={:#x}", socket_handle, cmd);
++  }
+   X_STATUS status = socket->IOControl(cmd, arg_ptr);
+   if (XFAILED(status)) {
+     XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+@@ -670,6 +995,11 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
+   }
+ 
+   N_XSOCKADDR_IN native_name(name);
++  if (PacketLogEnabled()) {
++    char addr[48];
++    FormatSockaddr(&native_name, addr, sizeof(addr));
++    REXKRNL_INFO("[net-pkt] bind sock={} local={}", socket_handle, addr);
++  }
+   X_STATUS status = socket->Bind(&native_name, namelen);
+   if (XFAILED(status)) {
+     XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+@@ -688,8 +1018,31 @@ u32 NetDll_connect_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> nam
+   }
+ 
+   N_XSOCKADDR native_name(name);
++  if (PacketLogEnabled()) {
++    // XSOCKADDR is generic; cast to sockaddr_in-shaped for logging (family+port+addr layout).
++    char dst[48];
++    FormatSockaddr(reinterpret_cast<const N_XSOCKADDR_IN*>(&native_name), dst, sizeof(dst));
++    REXKRNL_INFO("[net-pkt] connect sock={} dst={}", socket_handle, dst);
++  }
+   X_STATUS status = socket->Connect(&native_name, namelen);
+   if (XFAILED(status)) {
++    // [online] The game sets the socket non-blocking (FIONBIO) before
++    // connect, so a native connect returns WSAEWOULDBLOCK/EINPROGRESS = "in
++    // progress, poll via select()". The default X_STATUS mapping turned that
++    // into generic error 0x1f (ERROR_GEN_FAILURE), which DirtySDK read as a HARD
++    // failure and aborted -- even though select() then reported the socket
++    // writable and getpeername succeeded. Report the guest's WSAEWOULDBLOCK
++    // (0x2733 = 10035) for the in-progress case so the client polls + proceeds.
++#if REX_PLATFORM_WIN32
++    int nerr = WSAGetLastError();
++    if (nerr == WSAEWOULDBLOCK || nerr == WSAEINPROGRESS || nerr == WSAEALREADY) {
++      XThread::SetLastError(0x2733);  // WSAEWOULDBLOCK
++      if (PacketLogEnabled()) {
++        REXKRNL_INFO("[net-pkt] connect sock={} -> in-progress (WSAEWOULDBLOCK)", socket_handle);
++      }
++      return -1;
++    }
++#endif
+     XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
+     return -1;
+   }
+@@ -697,6 +1050,121 @@ u32 NetDll_connect_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR> nam
+   return 0;
+ }
+ 
++// [online] getpeername/getsockname were stubs. EA's client calls
++// getpeername right after connect() to validate the connection; a stubbed
++// failure made it give up and close the socket having sent 0 bytes. Implement
++// both against the real underlying host socket so the connected peer/local
++// address come back correctly and the client proceeds to send its Blaze data.
++u32 NetDll_getpeername_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> name,
++                             mapped_u32 namelen) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    XThread::SetLastError(0x2736);  // WSAENOTSOCK
++    return -1;
++  }
++  sockaddr_in peer = {};
++  peer.sin_family = AF_INET;
++#if REX_PLATFORM_WIN32
++  int plen = static_cast<int>(sizeof(peer));
++  int ret = ::getpeername(static_cast<SOCKET>(socket->native_handle()),
++                          reinterpret_cast<sockaddr*>(&peer), &plen);
++#else
++  socklen_t plen = sizeof(peer);
++  int ret = ::getpeername(static_cast<int>(socket->native_handle()),
++                          reinterpret_cast<sockaddr*>(&peer), &plen);
++#endif
++  if (ret != 0) {
++    XThread::SetLastError(0x2749);  // WSAENOTCONN
++    return -1;
++  }
++  if (name) {
++    // Guest XSOCKADDR_IN = [be16 family][be16 port net-order][be32 addr net-order]
++    // (see xsocket.h: sin_port/sin_addr are "Always big-endian!"). winsock's
++    // sin_port/sin_addr are ALREADY network order -> copy raw. (StoreSockaddr
++    // store_and_swaps them, which double-reverses network-order bytes and made
++    // the guest see the peer as 1.0.0.127:<reversed> -> EA client rejected it.)
++    uint8_t* p = reinterpret_cast<uint8_t*>(name.host_address());
++    memory::store_and_swap<uint16_t>(p + 0, 2 /* AF_INET */);
++    std::memcpy(p + 2, &peer.sin_port, 2);
++    std::memcpy(p + 4, &peer.sin_addr.s_addr, 4);
++  }
++  if (namelen) {
++    *namelen = 16u;  // guest sockaddr_in size
++  }
++  if (PacketLogEnabled()) {
++    const uint8_t* ab = reinterpret_cast<const uint8_t*>(&peer.sin_addr);
++    REXKRNL_INFO("[net-pkt] getpeername sock={} peer={}.{}.{}.{}:{}", socket_handle, ab[0], ab[1],
++                 ab[2], ab[3], static_cast<uint32_t>(ntohs(peer.sin_port)));
++  }
++  return 0;
++}
++
++u32 NetDll_getsockname_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> name,
++                             mapped_u32 namelen) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    XThread::SetLastError(0x2736);  // WSAENOTSOCK
++    return -1;
++  }
++  sockaddr_in local = {};
++  local.sin_family = AF_INET;
++#if REX_PLATFORM_WIN32
++  int llen = static_cast<int>(sizeof(local));
++  int ret = ::getsockname(static_cast<SOCKET>(socket->native_handle()),
++                          reinterpret_cast<sockaddr*>(&local), &llen);
++#else
++  socklen_t llen = sizeof(local);
++  int ret = ::getsockname(static_cast<int>(socket->native_handle()),
++                          reinterpret_cast<sockaddr*>(&local), &llen);
++#endif
++  if (ret != 0) {
++    XThread::SetLastError(0x2749);  // WSAENOTCONN
++    return -1;
++  }
++  if (name) {
++    // Same guest XSOCKADDR_IN layout as getpeername -- raw-copy the already-
++    // network-order port/addr; only the family needs host->big-endian.
++    uint8_t* p = reinterpret_cast<uint8_t*>(name.host_address());
++    memory::store_and_swap<uint16_t>(p + 0, 2 /* AF_INET */);
++    std::memcpy(p + 2, &local.sin_port, 2);
++    std::memcpy(p + 4, &local.sin_addr.s_addr, 4);
++  }
++  if (namelen) {
++    *namelen = 16u;
++  }
++  if (PacketLogEnabled()) {
++    const uint8_t* ab = reinterpret_cast<const uint8_t*>(&local.sin_addr);
++    REXKRNL_INFO("[net-pkt] getsockname sock={} local={}.{}.{}.{}:{}", socket_handle, ab[0], ab[1],
++                 ab[2], ab[3], static_cast<uint32_t>(ntohs(local.sin_port)));
++  }
++  return 0;
++}
++
++// [online] getsockopt was a stub. After connect, DirtySDK typically
++// calls getsockopt(SOL_SOCKET, SO_ERROR) to check the connect result; a stubbed
++// garbage return would make it treat the (successful) connection as failed.
++// Report success with a zeroed value (SO_ERROR = 0 = "no error"). Logged so we
++// can see exactly which option is queried and extend if a real value is needed.
++u32 NetDll_getsockopt_entry(u32 caller, u32 socket_handle, u32 level, u32 optname,
++                            mapped_void optval, mapped_u32 optlen) {
++  auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
++  if (!socket) {
++    XThread::SetLastError(0x2736);  // WSAENOTSOCK
++    return -1;
++  }
++  if (optval) {
++    memory::store_and_swap<uint32_t>(reinterpret_cast<uint8_t*>(optval.host_address()), 0);
++  }
++  if (optlen) {
++    *optlen = 4u;
++  }
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] getsockopt sock={} level={:#x} optname={:#x} -> 0 (success)",
++                 socket_handle, level, optname);
++  }
++  return 0;
++}
++
+ u32 NetDll_listen_entry(u32 caller, u32 socket_handle, i32 backlog) {
+   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket_handle);
+   if (!socket) {
+@@ -840,6 +1308,10 @@ i32 NetDll_select_entry(i32 caller, i32 nfds, ppc_ptr_t<x_fd_set> readfds,
+     host_exceptfds.Store(exceptfds);
+   }
+ 
++  if (PacketLogEnabled()) {
++    REXKRNL_INFO("[net-pkt] select nfds={} r={} w={} e={} -> ret={}", nfds, readfds ? 1 : 0,
++                 writefds ? 1 : 0, exceptfds ? 1 : 0, ret);
++  }
+   // TODO(gibbed): modify ret to be what's actually copied to the guest fd_sets?
+   return ret;
+ }
+@@ -852,7 +1324,26 @@ u32 NetDll_recv_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
+     return -1;
+   }
+ 
+-  return socket->Recv(buf_ptr, buf_len, flags);
++  int ret = socket->Recv(buf_ptr, buf_len, flags);
++  if (PacketLogEnabled() && ret > 0) {
++    char peek[64];
++    FormatHexPeek(buf_ptr, static_cast<size_t>(ret), peek, sizeof(peek));
++    REXKRNL_INFO("[net-pkt] recv sock={} len={} data=[{}]",
++                 socket_handle, ret, peek);
++  }
++  // Propagate the socket error the same way recvfrom does. The Blaze / EA
++  // Nation TCP read loop drains the socket until a recv "would block", then
++  // checks WSAGetLastError expecting WSAEWOULDBLOCK (0x2733). Without this the
++  // guest reads a stale last-error (observed: 0x80004005 E_FAIL) and treats the
++  // connection as failed, tearing down the EA Nation session right after login.
++  if (ret == -1) {
++#if REX_PLATFORM_WIN32
++    XThread::SetLastError(WSAGetLastError());
++#else
++    XThread::SetLastError(0x0);
++#endif
++  }
++  return ret;
+ }
+ 
+ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 buf_len,
+@@ -882,6 +1373,13 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
+     *fromlen_ptr = native_fromlen;
+   }
+ 
++  if (PacketLogEnabled() && ret > 0) {
++    char src[48], peek[64];
++    FormatSockaddr(&native_from, src, sizeof(src));
++    FormatHexPeek(buf_ptr, static_cast<size_t>(ret), peek, sizeof(peek));
++    REXKRNL_INFO("[net-pkt] recvfrom sock={} src={} len={} data=[{}]",
++                 socket_handle, src, ret, peek);
++  }
+   if (ret == -1) {
+ // TODO: Better way of getting the error code
+ #if REX_PLATFORM_WIN32
+@@ -903,6 +1401,12 @@ u32 NetDll_send_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32 bu
+     return -1;
+   }
+ 
++  if (PacketLogEnabled()) {
++    char peek[64];
++    FormatHexPeek(buf_ptr, static_cast<size_t>(buf_len), peek, sizeof(peek));
++    REXKRNL_INFO("[net-pkt] send sock={} len={} data=[{}]",
++                 socket_handle, buf_len, peek);
++  }
+   return socket->Send(buf_ptr, buf_len, flags);
+ }
+ 
+@@ -916,9 +1420,22 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32
+   }
+ 
+   N_XSOCKADDR_IN native_to(to_ptr);
++  if (PacketLogEnabled()) {
++    char dst[48], peek[64];
++    FormatSockaddr(&native_to, dst, sizeof(dst));
++    FormatHexPeek(buf_ptr, static_cast<size_t>(buf_len), peek, sizeof(peek));
++    REXKRNL_INFO("[net-pkt] sendto sock={} dst={} len={} data=[{}]",
++                 socket_handle, dst, buf_len, peek);
++  }
+   return socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+ }
+ 
++// [online] XNetLogonGetTitleID: the running title's ID (was a stub returning 0,
++// which makes EA clients abort their Xbox LIVE activation).
++u32 XNetLogonGetTitleID_entry() {
++  return REX_KERNEL_STATE()->title_id();
++}
++
+ u32 NetDll___WSAFDIsSet_entry(u32 socket_handle, ppc_ptr_t<x_fd_set> fd_set) {
+   const uint8_t max_fd_count = std::min((uint32_t)fd_set->fd_count, uint32_t(64));
+   for (uint8_t i = 0; i < max_fd_count; i++) {
+@@ -985,6 +1502,8 @@ REX_EXPORT(__imp__NetDll_send, rex::kernel::xam::NetDll_send_entry)
+ REX_EXPORT(__imp__NetDll_sendto, rex::kernel::xam::NetDll_sendto_entry)
+ REX_EXPORT(__imp__NetDll___WSAFDIsSet, rex::kernel::xam::NetDll___WSAFDIsSet_entry)
+ REX_EXPORT(__imp__NetDll_WSASetLastError, rex::kernel::xam::NetDll_WSASetLastError_entry)
++// [online] Real XNetLogonGetTitleID (was REX_EXPORT_STUB in xam_misc.cpp).
++REX_EXPORT(__imp__XNetLogonGetTitleID, rex::kernel::xam::XNetLogonGetTitleID_entry)
+ 
+ REX_EXPORT_STUB(__imp__NetDll_UpnpActionCalculateWorkBufferSize);
+ REX_EXPORT_STUB(__imp__NetDll_UpnpActionCreate);
+@@ -1030,12 +1549,12 @@ REX_EXPORT_STUB(__imp__NetDll_XHttpSetStatusCallback);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpShutdown);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpStartup);
+ REX_EXPORT_STUB(__imp__NetDll_XHttpWriteData);
+-REX_EXPORT_STUB(__imp__NetDll_XNetConnect);
++REX_EXPORT(__imp__NetDll_XNetConnect, rex::kernel::xam::NetDll_XNetConnect_entry)
+ REX_EXPORT_STUB(__imp__NetDll_XNetCreateKey);
+ REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseLookup);
+ REX_EXPORT_STUB(__imp__NetDll_XNetDnsReverseRelease);
+ REX_EXPORT_STUB(__imp__NetDll_XNetGetBroadcastVersionStatus);
+-REX_EXPORT_STUB(__imp__NetDll_XNetGetConnectStatus);
++REX_EXPORT(__imp__NetDll_XNetGetConnectStatus, rex::kernel::xam::NetDll_XNetGetConnectStatus_entry)
+ REX_EXPORT_STUB(__imp__NetDll_XNetGetSystemLinkPort);
+ REX_EXPORT_STUB(__imp__NetDll_XNetGetXnAddrPlatform);
+ REX_EXPORT_STUB(__imp__NetDll_XNetInAddrToServer);
+@@ -1043,7 +1562,7 @@ REX_EXPORT_STUB(__imp__NetDll_XNetQosGetListenStats);
+ REX_EXPORT_STUB(__imp__NetDll_XNetQosLookup);
+ REX_EXPORT_STUB(__imp__NetDll_XNetRegisterKey);
+ REX_EXPORT_STUB(__imp__NetDll_XNetReplaceKey);
+-REX_EXPORT_STUB(__imp__NetDll_XNetServerToInAddr);
++REX_EXPORT(__imp__NetDll_XNetServerToInAddr, rex::kernel::xam::NetDll_XNetServerToInAddr_entry)
+ REX_EXPORT_STUB(__imp__NetDll_XNetSetOpt);
+ REX_EXPORT_STUB(__imp__NetDll_XNetStartupEx);
+ REX_EXPORT_STUB(__imp__NetDll_XNetTsAddrToInAddr);
+@@ -1097,6 +1616,6 @@ REX_EXPORT_STUB(__imp__NetDll_XnpToolIpProxyInject);
+ REX_EXPORT_STUB(__imp__NetDll_XnpToolSetCallbacks);
+ REX_EXPORT_STUB(__imp__NetDll_XnpUnregisterKeyForCallerType);
+ REX_EXPORT_STUB(__imp__NetDll_XnpUpdateConfigParams);
+-REX_EXPORT_STUB(__imp__NetDll_getpeername);
+-REX_EXPORT_STUB(__imp__NetDll_getsockname);
+-REX_EXPORT_STUB(__imp__NetDll_getsockopt);
++REX_EXPORT(__imp__NetDll_getpeername, rex::kernel::xam::NetDll_getpeername_entry)
++REX_EXPORT(__imp__NetDll_getsockname, rex::kernel::xam::NetDll_getsockname_entry)
++REX_EXPORT(__imp__NetDll_getsockopt, rex::kernel::xam::NetDll_getsockopt_entry)
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+index 8778066..363ee96 100644
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -71,6 +71,8 @@ u32 XamUserGetSigninState_entry(u32 user_index) {
+     if (user_index == 0) {
+       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+       signin_state = user_profile->signin_state();
++      // [online] signed in to LIVE (2) when going online through a revival server.
++      if (rex::cvar::Query<bool>("online_enabled")) signin_state = 2;
+     }
+   }
+   return signin_state;
+@@ -99,6 +101,7 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
+   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+   info->xuid = user_profile->xuid();
+   info->signin_state = user_profile->signin_state();
++  if (rex::cvar::Query<bool>("online_enabled")) info->signin_state = 2;
+   rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
+   return X_E_SUCCESS;
+ }
+@@ -383,7 +386,8 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value)
+   }
+ 
+   // If we deny everything, games should hopefully not try to do stuff.
+-  *out_value = 0;
++  // [online] With a revival server every privilege (multiplayer etc.) is granted.
++  *out_value = rex::cvar::Query<bool>("online_enabled") ? 1 : 0;
+   return X_ERROR_SUCCESS;
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,108 @@
+# Functions the code generator does not find on its own because the game only
+# reaches them through function pointers in the online code. Added after
+# "Call to invalid or unregistered function" errors.
+
+[functions]
+
+# Online menu (sele MYGAME/STATS): small getter called through a table.
+"0x8283DDB0" = { end = 0x8283DDD0 }
+
+# Match start after quick match (+ses): vtable thunk.
+"0x82DEAFC0" = { end = 0x82DEAFD8 }
+
+# Found by scanning the game's virtual-method tables for functions the code
+# generator did not register (fifa09_init.cpp, 2026-10-15). Bounds are left
+# to the generator.
+"0x8230B908" = {}
+"0x823D25C8" = {}
+"0x823D25F8" = {}
+"0x82475160" = {}
+"0x82475170" = {}
+"0x82475578" = {}
+"0x824755A0" = {}
+"0x824755C8" = {}
+"0x824755F0" = {}
+"0x82475A18" = {}
+"0x8250ED30" = {}
+"0x82511B20" = {}
+"0x82511B68" = {}
+"0x825165A8" = {}
+"0x825165D8" = {}
+"0x825165E0" = {}
+"0x825165E8" = {}
+"0x82517658" = {}
+"0x82518950" = {}
+"0x82518958" = {}
+"0x82518978" = {}
+"0x82518990" = {}
+"0x825B7ED8" = {}
+"0x82624B78" = {}
+"0x82624C00" = {}
+"0x82624C78" = {}
+"0x826317C0" = {}
+"0x826317C8" = {}
+"0x82703540" = {}
+"0x827589A8" = {}
+"0x8281CC40" = {}
+"0x82833FA8" = {}
+"0x8296C830" = {}
+"0x8298B318" = {}
+"0x8298B698" = {}
+"0x829A45D0" = {}
+"0x829AF800" = {}
+"0x82A45420" = {}
+"0x82A73588" = {}
+"0x82AB7C60" = {}
+"0x82AB8168" = {}
+"0x82AD1EE8" = {}
+"0x82B2C190" = {}
+"0x82BD5D28" = {}
+"0x82BD5D58" = {}
+"0x82BD5D90" = {}
+"0x82C12378" = {}
+"0x82C12380" = {}
+"0x82C33BB0" = {}
+"0x82C5B0D8" = {}
+"0x82C5D0D8" = {}
+"0x82C5D0F0" = {}
+"0x82C60018" = {}
+"0x82C60200" = {}
+"0x82C632E0" = {}
+"0x82C67508" = {}
+"0x82C67520" = {}
+"0x82C676D8" = {}
+"0x82C67760" = {}
+"0x82C688B0" = {}
+"0x82C74150" = {}
+"0x82CA9048" = {}
+"0x82CA9068" = {}
+"0x82CB11E0" = {}
+"0x82CB11F0" = {}
+"0x82CE5978" = {}
+"0x82CF5698" = {}
+"0x82CF56B8" = {}
+"0x82CF59D8" = {}
+"0x82CF59F8" = {}
+"0x82CF5B48" = {}
+"0x82CF5B68" = {}
+"0x82D062F8" = {}
+"0x82D06368" = {}
+"0x82D06388" = {}
+"0x82D23630" = {}
+"0x82DEA780" = {}
+"0x82F33200" = {}
+"0x82F6D4F0" = {}
+"0x82FBF1B8" = {}
+"0x82FC4D48" = {}
+"0x82FC7038" = {}
+"0x82FC71C8" = {}
+"0x82FC71E8" = {}
+"0x82FC7208" = {}
+"0x82FC7228" = {}
+"0x82FC7248" = {}
+"0x82FC7268" = {}
+"0x82FC7288" = {}
+"0x82FC72A8" = {}
+"0x82FC72C8" = {}
+"0x82FC72E8" = {}
+"0x83170420" = {}

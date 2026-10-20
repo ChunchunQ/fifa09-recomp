@@ -1,0 +1,66 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c9dfc17..a059d01 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -20,7 +20,7 @@ project(ReXGlue
+ #==========================================================
+ option(REXGLUE_BUILD_TESTS       "Build PPC instruction and unit tests" OFF)
+ option(REXGLUE_ENABLE_SANITIZERS "Enable UndefinedBehaviorSanitizer" OFF)
+-option(REXGLUE_ENABLE_FIDELITYFX "Enable optional AMD FidelityFX integration (experimental)" OFF)
++option(REXGLUE_ENABLE_FIDELITYFX "Enable optional AMD FidelityFX integration (FSR; the FIFA 09 launcher needs it)" ON)
+ option(REXGLUE_ENABLE_TRACY                "Enable Tracy profiler integration" ON)
+ option(REXGLUE_ENABLE_PERF_COUNTERS        "Enable lightweight perf counter registry and overlay" ON)
+ # Propagate profiling defines globally (compiled out in Release)
+diff --git a/cmake/rexglueConfig.cmake.in b/cmake/rexglueConfig.cmake.in
+index ff7f132..ca77b89 100644
+--- a/cmake/rexglueConfig.cmake.in
++++ b/cmake/rexglueConfig.cmake.in
+@@ -44,6 +44,19 @@ if(TARGET rex::rexglue)
+         MAP_IMPORTED_CONFIG_DEBUG Release
+         MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
+         MAP_IMPORTED_CONFIG_MINSIZEREL Release)
++    # Installing one config after the export set changed (e.g. FidelityFX turned on)
++    # makes CMake delete the other configs' import files, and with them the Release
++    # location of the code generator. The tool itself is still installed: point at it.
++    get_target_property(_rexglue_loc rex::rexglue IMPORTED_LOCATION_RELEASE)
++    if(NOT _rexglue_loc)
++        find_program(_rexglue_exe NAMES rexglue PATHS "${PACKAGE_PREFIX_DIR}/bin" NO_DEFAULT_PATH)
++        if(_rexglue_exe)
++            set_property(TARGET rex::rexglue APPEND PROPERTY IMPORTED_CONFIGURATIONS RELEASE)
++            set_target_properties(rex::rexglue PROPERTIES IMPORTED_LOCATION_RELEASE "${_rexglue_exe}")
++        endif()
++        unset(_rexglue_exe CACHE)
++    endif()
++    unset(_rexglue_loc)
+ endif()
+ 
+ if(TARGET rex::runtime AND NOT TARGET rex::system)
+diff --git a/cmake/rexglue_fidelityfx.cmake b/cmake/rexglue_fidelityfx.cmake
+index af35fa8..6378389 100644
+--- a/cmake/rexglue_fidelityfx.cmake
++++ b/cmake/rexglue_fidelityfx.cmake
+@@ -58,6 +58,24 @@ if(NOT fidelityfx_POPULATED)
+     FetchContent_Populate(fidelityfx)
+ endif()
+ 
++# ffx-api's version resource is saved as UTF-16 LE; clang's preprocessor (llvm-rc via
++# cmake_llvm_rc) refuses it ("UTF-16 (LE) byte order mark detected"). Convert it to
++# UTF-8 once after the fetch; the text is plain ASCII.
++set(_rexglue_ffx_rc "${fidelityfx_SOURCE_DIR}/ffx-api/src/resource/ffx_api_dll.rc")
++if(WIN32 AND EXISTS "${_rexglue_ffx_rc}")
++    file(READ "${_rexglue_ffx_rc}" _rexglue_ffx_bom LIMIT 2 HEX)
++    if(_rexglue_ffx_bom STREQUAL "fffe")
++        execute_process(COMMAND powershell -NoProfile -ExecutionPolicy Bypass -Command
++            "$f='${_rexglue_ffx_rc}'; $t=[IO.File]::ReadAllText($f,[Text.Encoding]::Unicode); [IO.File]::WriteAllText($f,$t,(New-Object Text.UTF8Encoding $false))"
++            RESULT_VARIABLE _rexglue_ffx_conv)
++        if(NOT _rexglue_ffx_conv EQUAL 0)
++            message(WARNING "Could not convert ${_rexglue_ffx_rc} to UTF-8; the FidelityFX DLL may not build")
++        endif()
++    endif()
++    unset(_rexglue_ffx_bom)
++endif()
++unset(_rexglue_ffx_rc)
++
+ set(REXGLUE_FIDELITYFX_SOURCE_DIR "${fidelityfx_SOURCE_DIR}" CACHE INTERNAL
+     "Root of the fetched FidelityFX SDK source tree")
+ 

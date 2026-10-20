@@ -1,0 +1,77 @@
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+index 1e0830e..a528704 100644
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -159,19 +159,16 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
+                                       be<uint32_t>* setting_ids, uint32_t unk,
+                                       be<uint32_t>* buffer_size_ptr, uint8_t* buffer,
+                                       XAM_OVERLAPPED* overlapped) {
++  // FIFA 09 online asks for other players' settings too (remote XUIDs, sometimes
++  // several at once, e.g. when leaving an online session). The old asserts broke
++  // into the debugger there and killed the game. Remote players now get entries
++  // marked "not set" (from = 0); only the local XUID gets real data.
+   if (!xuid_count) {
+-    assert_null(xuids);
+-  } else {
+-    assert_true(xuid_count == 1);
+-    assert_not_null(xuids);
+-    // TODO(gibbed): allow proper lookup of arbitrary XUIDs
+-    const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+-    assert_true(static_cast<uint64_t>(xuids[0]) == user_profile->xuid());
+-    // TODO(gibbed): we assert here, but in case a title passes xuid_count > 1
+-    // until it's implemented for release builds...
+-    xuid_count = 1;
++    xuids = nullptr;
++  } else if (!xuids || xuid_count > 16) {
++    return X_ERROR_INVALID_PARAMETER;
+   }
+-  assert_zero(unk);  // probably flags
++  (void)unk;  // probably flags
+ 
+   // must have at least 1 to 32 settings
+   if (setting_count < 1 || setting_count > 32) {
+@@ -267,23 +264,29 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
+ 
+   UserProfile::SettingByteStream out_stream(REX_KERNEL_MEMORY()->HostToGuestVirtual(buffer), buffer,
+                                             buffer_size, needed_header_size);
+-  for (uint32_t n = 0; n < setting_count; ++n) {
+-    uint32_t setting_id = setting_ids[n];
+-    auto setting = user_profile->GetSetting(setting_id);
+-
+-    std::memset(out_setting, 0, sizeof(X_USER_PROFILE_SETTING));
+-    out_setting->from = !setting || !setting->is_set ? 0 : setting->is_title_specific() ? 2 : 1;
+-    if (xuids) {
+-      out_setting->xuid = user_profile->xuid();
+-    } else {
+-      out_setting->user_index = static_cast<uint32_t>(user_index);
+-    }
+-    out_setting->setting_id = setting_id;
++  const uint32_t xuid_loops = xuids ? xuid_count : 1;
++  out_header->setting_count = static_cast<uint32_t>(setting_count * xuid_loops);
++  for (uint32_t x = 0; x < xuid_loops; ++x) {
++    const uint64_t xuid = xuids ? static_cast<uint64_t>(xuids[x]) : 0;
++    const bool local = !xuids || xuid == user_profile->xuid();
++    for (uint32_t n = 0; n < setting_count; ++n) {
++      uint32_t setting_id = setting_ids[n];
++      auto setting = local ? user_profile->GetSetting(setting_id) : nullptr;
++
++      std::memset(out_setting, 0, sizeof(X_USER_PROFILE_SETTING));
++      out_setting->from = !setting || !setting->is_set ? 0 : setting->is_title_specific() ? 2 : 1;
++      if (xuids) {
++        out_setting->xuid = xuid;
++      } else {
++        out_setting->user_index = static_cast<uint32_t>(user_index);
++      }
++      out_setting->setting_id = setting_id;
+ 
+-    if (setting && setting->is_set) {
+-      setting->Append(&out_setting->data, &out_stream);
++      if (setting && setting->is_set) {
++        setting->Append(&out_setting->data, &out_stream);
++      }
++      ++out_setting;
+     }
+-    ++out_setting;
+   }
+ 
+   if (overlapped) {

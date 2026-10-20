@@ -1,0 +1,159 @@
+From f1185a10222ac4eff9f67eb2e8e92a4a966b9b0a Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 14:02:20 +0300
+Subject: [PATCH] local: online_disable test switch
+
+---
+ src/kernel/xam/xam_net.cpp  | 27 +++++++++++++++++++--------
+ src/kernel/xam/xam_user.cpp | 13 ++++++++++---
+ 2 files changed, 29 insertions(+), 11 deletions(-)
+
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 49fe218..a854f8d 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -54,6 +54,10 @@ REXCVAR_DEFINE_STRING(online_public_ip, "", "Net",
+                       "Address reported as this console's public IP (XNADDR inaOnline); "
+                       "empty = the local IP")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_STRING(online_disable, "", "Net",
++                      "Debugging: comma list of online parts to keep offline "
++                      "(xnaddr, link, qos, redirect, signin, priv)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_BOOL(net_packet_log, false, "Net",
+                     "Log every socket call, DNS lookup and XLIVEBASE message the game "
+                     "makes (destination, length, first 16 bytes)")
+@@ -76,6 +80,13 @@ namespace xam {
+ using namespace rex::system;
+ using namespace rex::system::xam;
+ 
++// [online] Test switch: online_disable="signin,priv" etc. keeps those parts offline.
++static bool OnlineFeature(const char* part) {
++  if (!rex::cvar::Query<bool>("online_enabled")) return false;
++  const std::string off = rex::cvar::Query<std::string>("online_disable");
++  return off.find(part) == std::string::npos;
++}
++
+ // [online] Packet-log helpers. Format sockaddr fields safely regardless
+ // of rex::be's implicit-conversion behavior by extracting raw bytes (sin_addr
+ // and sin_port are always stored network byte order per XSOCKADDR_IN's comment).
+@@ -531,7 +542,7 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+   // the game stays quietly offline and doesn't try to reach EA Nation (which
+   // dead-ends at EA's console-cert auth). Our own netplay is the online path.
+   // The EA-Nation experiment path below only runs under online_enabled.
+-  if (!REXCVAR_GET(online_enabled)) {
++  if (!OnlineFeature("xnaddr")) {
+     addr_ptr->ina.s_addr = htonl(INADDR_LOOPBACK);
+     addr_ptr->inaOnline.s_addr = 0;
+     addr_ptr->wPortOnline = 0;
+@@ -628,7 +639,7 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
+   // address to our own Blaze server IP so the game connects to US, not EA. The
+   // original stub returned 1 = failure, which is what made the EA client give up
+   // with "EA server is not available" before ever opening a socket.
+-  if (REXCVAR_GET(online_enabled)) {
++  if (OnlineFeature("redirect")) {
+     const uint32_t redirect = BlazeRedirectNBO();
+     if (in_addr) {
+       std::memcpy(in_addr.host_address(), &redirect, sizeof(redirect));
+@@ -654,7 +665,7 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
+ // under this SDK's leading-`caller` convention -- the log confirms/corrects it.
+ u32 NetDll_XNetServerToInAddr_entry(u32 caller, u32 server_ina, u32 service_id,
+                                     mapped_void in_addr) {
+-  if (!REXCVAR_GET(online_enabled)) {
++  if (!OnlineFeature("redirect")) {
+     return 1;  // offline: behave like the old failing stub.
+   }
+   const uint32_t redirect = BlazeRedirectNBO();
+@@ -710,7 +721,7 @@ u32 NetDll_XNetConnect_entry(u32 caller, u32 ina) {
+ }
+ 
+ u32 NetDll_XNetGetConnectStatus_entry(u32 caller, u32 ina) {
+-  if (REXCVAR_GET(online_enabled)) {
++  if (OnlineFeature("redirect")) {
+     static uint32_t s_calls = 0;
+     if (PacketLogEnabled() && (s_calls++ % 500) == 0) {
+       REXKRNL_INFO("[net-pkt] XNetGetConnectStatus caller={} #{} -> CONNECTED", caller, s_calls);
+@@ -736,7 +747,7 @@ u32 NetDll_XNetGetEthernetLinkStatus_entry(u32 caller) {
+   // even though XNetGetTitleXnAddr says ONLINE. Report an ACTIVE 100Mbps
+   // full-duplex link so that gate passes. Shipping behavior (cvar OFF) is
+   // unchanged: report no link so the game stays quietly offline on our relay.
+-  if (REXCVAR_GET(online_enabled)) {
++  if (OnlineFeature("link")) {
+     return XEthernetStatus::XNET_ETHERNET_LINK_ACTIVE |
+            XEthernetStatus::XNET_ETHERNET_LINK_100MBPS |
+            XEthernetStatus::XNET_ETHERNET_LINK_FULL_DUPLEX;
+@@ -783,7 +794,7 @@ u32 NetDll_XNetDnsLookup_entry(u32 caller, mapped_string host, u32 event_handle,
+     // ea.com) reach our server on the same box instead of failing (a failed
+     // lookup made the game connect to 255.255.255.255 and show "EA server not
+     // available"). Only when online-for-real; otherwise report a lookup failure.
+-    if (REXCVAR_GET(online_enabled) && !HostIsContentDownload(host)) {
++    if (OnlineFeature("redirect") && !HostIsContentDownload(host)) {
+       dns->status = 0;  // success
+       dns->cina = 1;    // one address
+       dns->aina[0].s_addr = BlazeRedirectNBO();  // our server IP (network order)
+@@ -818,7 +829,7 @@ u32 NetDll_XNetQosServiceLookup_entry(u32 caller, u32 flags, u32 event_handle, m
+   // it has a good internet connection (open NAT, low latency, high bandwidth).
+   // The old stub returned 0 probes -> the game concluded it had no usable internet
+   // and fell back to "you have lost your connection to EA Nation".
+-  if (pqos && !REXCVAR_GET(online_enabled)) {
++  if (pqos && !OnlineFeature("qos")) {
+     // Offline: no probes (some games read pqos even on failure).
+     auto qos_guest = REX_KERNEL_MEMORY()->SystemHeapAlloc(sizeof(XNQOS));
+     auto qos = REX_KERNEL_MEMORY()->TranslateVirtual<XNQOS*>(qos_guest);
+@@ -863,7 +874,7 @@ u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32
+   // [online] Report success so the game can register as a QoS host
+   // (was FUNCTION_FAILED, which could make the game consider itself unable to
+   // host / verify connectivity). No real UDP QoS listener is set up yet.
+-  return REXCVAR_GET(online_enabled) ? 0 : X_ERROR_FUNCTION_FAILED;
++  return OnlineFeature("qos") ? 0 : X_ERROR_FUNCTION_FAILED;
+ }
+ 
+ u32 NetDll_inet_addr_entry(mapped_string addr_ptr) {
+diff --git a/src/kernel/xam/xam_user.cpp b/src/kernel/xam/xam_user.cpp
+index 363ee96..1e0830e 100644
+--- a/src/kernel/xam/xam_user.cpp
++++ b/src/kernel/xam/xam_user.cpp
+@@ -36,6 +36,13 @@ namespace xam {
+ using namespace rex::system;
+ using namespace rex::system::xam;
+ 
++// [online] Test switch: online_disable="signin,priv" etc. keeps those parts offline.
++static bool OnlineFeature(const char* part) {
++  if (!rex::cvar::Query<bool>("online_enabled")) return false;
++  const std::string off = rex::cvar::Query<std::string>("online_disable");
++  return off.find(part) == std::string::npos;
++}
++
+ i32 XamUserGetXUID_entry(u32 user_index, u32 type_mask, mapped_u64 xuid_ptr) {
+   assert_true(type_mask == 1 || type_mask == 2 || type_mask == 3 || type_mask == 4 ||
+               type_mask == 7);
+@@ -72,7 +79,7 @@ u32 XamUserGetSigninState_entry(u32 user_index) {
+       const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+       signin_state = user_profile->signin_state();
+       // [online] signed in to LIVE (2) when going online through a revival server.
+-      if (rex::cvar::Query<bool>("online_enabled")) signin_state = 2;
++      if (OnlineFeature("signin")) signin_state = 2;
+     }
+   }
+   return signin_state;
+@@ -101,7 +108,7 @@ i32 XamUserGetSigninInfo_entry(u32 user_index, u32 flags, ppc_ptr_t<X_USER_SIGNI
+   const auto& user_profile = REX_KERNEL_STATE()->user_profile();
+   info->xuid = user_profile->xuid();
+   info->signin_state = user_profile->signin_state();
+-  if (rex::cvar::Query<bool>("online_enabled")) info->signin_state = 2;
++  if (OnlineFeature("signin")) info->signin_state = 2;
+   rex::string::copy_truncating(info->name, user_profile->name(), rex::countof(info->name));
+   return X_E_SUCCESS;
+ }
+@@ -387,7 +394,7 @@ u32 XamUserCheckPrivilege_entry(u32 user_index, u32 mask, mapped_u32 out_value)
+ 
+   // If we deny everything, games should hopefully not try to do stuff.
+   // [online] With a revival server every privilege (multiplayer etc.) is granted.
+-  *out_value = rex::cvar::Query<bool>("online_enabled") ? 1 : 0;
++  *out_value = OnlineFeature("priv") ? 1 : 0;
+   return X_ERROR_SUCCESS;
+ }
+ 
+-- 
+2.43.0
+

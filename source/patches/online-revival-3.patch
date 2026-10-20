@@ -1,0 +1,75 @@
+From cdf9c1574e6da85fdd686407559d51d5d9bf71c9 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 14:13:10 +0300
+Subject: [PATCH] local: XFriendsCreateEnumerator
+
+---
+ src/kernel/xam/apps/xlivebase_app.cpp | 45 ++++++++++++++++++++++-----
+ 1 file changed, 38 insertions(+), 7 deletions(-)
+
+diff --git a/src/kernel/xam/apps/xlivebase_app.cpp b/src/kernel/xam/apps/xlivebase_app.cpp
+index 4fe12c6..f88fcce 100644
+--- a/src/kernel/xam/apps/xlivebase_app.cpp
++++ b/src/kernel/xam/apps/xlivebase_app.cpp
+@@ -15,6 +15,7 @@
+ #include <rex/cvar.h>
+ #include <rex/kernel/xam/apps/xlivebase_app.h>
+ #include <rex/logging.h>
++#include <rex/system/xenumerator.h>
+ #include <rex/thread.h>
+ 
+ namespace rex {
+@@ -94,13 +95,43 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message, uint32_t buffer_pt
+       return X_E_SUCCESS;
+     }
+     case 0x00058020: {
+-      // 0x00058004 is called right before this.
+-      // We should create a XamEnumerate-able empty list here, but I'm not
+-      // sure of the format.
+-      // buffer_length seems to be the same ptr sent to 0x00058004.
+-      REXKRNL_DEBUG("CXLiveFriends::Enumerate({:08X}, {:08X}) unimplemented", buffer_ptr,
+-                    buffer_length);
+-      return X_E_FAIL;
++      // [online] XFriendsCreateEnumerator. buffer_length points to an argument
++      // list of 16-byte entries { be32 size; pad; be64 value_ptr }:
++      // user_index*, starting_index*, amount*, buffer_size_out*, handle_out*.
++      // EA titles (FIFA 09) keep using the handle even when this fails, so it
++      // must be 0 on failure; when signed in to LIVE an empty friends list is
++      // returned (0xC4-byte X_ONLINE_FRIEND items).
++      if (!buffer_length) return X_E_INVALIDARG;
++      auto arg = [&](int i) -> uint32_t {
++        return static_cast<uint32_t>(
++            memory::load_and_swap<uint64_t>(memory_->TranslateVirtual(buffer_length + i * 16 + 8)));
++      };
++      auto val = [&](uint32_t ptr) -> uint32_t {
++        return ptr ? memory::load_and_swap<uint32_t>(memory_->TranslateVirtual(ptr)) : 0;
++      };
++      const uint32_t user_index = val(arg(0));
++      const uint32_t amount = val(arg(2));
++      const uint32_t size_out = arg(3);
++      const uint32_t handle_out = arg(4);
++      if (!handle_out) return X_E_INVALIDARG;
++      memory::store_and_swap<uint32_t>(memory_->TranslateVirtual(handle_out), 0);
++      if (size_out) memory::store_and_swap<uint32_t>(memory_->TranslateVirtual(size_out), 0);
++      if (!rex::cvar::Query<bool>("online_enabled") || user_index >= 4 || amount > 100) {
++        REXKRNL_DEBUG("XFriendsCreateEnumerator(user={}, amount={}) -> no friends service",
++                      user_index, amount);
++        return X_E_FAIL;
++      }
++      const uint32_t items = amount ? amount : 1;
++      auto e = make_object<XStaticUntypedEnumerator>(kernel_state_, items, 0xC4);
++      auto result = e->Initialize(0xFFFFFFFF, app_id(), 0x58021, 0x58022, 0);
++      if (XFAILED(result)) return result;
++      if (size_out) {
++        memory::store_and_swap<uint32_t>(memory_->TranslateVirtual(size_out), items * 0xC4);
++      }
++      memory::store_and_swap<uint32_t>(memory_->TranslateVirtual(handle_out), e->handle());
++      REXKRNL_INFO("[online] XFriendsCreateEnumerator(user={}, amount={}) -> empty list, handle={:08X}",
++                   user_index, amount, e->handle());
++      return X_E_SUCCESS;
+     }
+     case 0x00058023: {
+       REXKRNL_DEBUG(
+-- 
+2.43.0
+

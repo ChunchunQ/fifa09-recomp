@@ -1,0 +1,6 @@
+# Local art only: third-party photos and trademarked logos must not be committed
+background.jpg
+background.png
+logo.png
+background*.png
+background*.jpg

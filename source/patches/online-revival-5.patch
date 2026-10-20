@@ -1,0 +1,48 @@
+From 8a43d6cb0dab6722aa82b6c66ea9098c01800510 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 14:25:05 +0300
+Subject: [PATCH] local: trace_imports direct cvar
+
+---
+ include/rex/hook.h         | 8 +++-----
+ src/kernel/xam/xam_net.cpp | 3 ++-
+ 2 files changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/include/rex/hook.h b/include/rex/hook.h
+index d1c2b25..f2186f0 100644
+--- a/include/rex/hook.h
++++ b/include/rex/hook.h
+@@ -58,13 +58,11 @@
+   }
+ #endif
+ 
+-namespace rex::detail {
+ // [online] Debugging aid: with trace_imports=true the first 4 calls of every
+ // kernel/XAM import are logged with arguments, result and guest caller.
+-inline bool TraceImportsEnabled() {
+-  static const bool enabled = rex::cvar::Query<bool>("trace_imports");
+-  return enabled;
+-}
++REXCVAR_DECLARE(bool, trace_imports);
++namespace rex::detail {
++inline bool TraceImportsEnabled() { return REXCVAR_GET(trace_imports); }
+ }  // namespace rex::detail
+ 
+ // Define a raw hook with direct ctx/base access.
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 421065d..fda6097 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -283,7 +283,8 @@ XNetStartupParams xnet_startup_params = {};
+ 
+ u32 NetDll_XNetStartup_entry(u32 caller, ppc_ptr_t<XNetStartupParams> params) {
+   if (PacketLogEnabled()) {
+-    REXKRNL_INFO("[net-pkt] XNetStartup caller={}", caller);
++    REXKRNL_INFO("[net-pkt] XNetStartup caller={} trace_imports={} online_disable='{}'", caller,
++                 REXCVAR_GET(trace_imports), REXCVAR_GET(online_disable));
+   }
+   if (params) {
+     assert_true(params->cfgSizeOfStruct == sizeof(XNetStartupParams));
+-- 
+2.43.0
+

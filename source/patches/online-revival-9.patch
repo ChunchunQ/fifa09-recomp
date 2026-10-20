@@ -1,0 +1,52 @@
+From f24cba73ccec29b114c86dfb7769fdf398ece6fb Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 15:21:32 +0300
+Subject: [PATCH] local: user_gamertag/user_xuid
+
+---
+ src/system/xam/user_profile.cpp | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/system/xam/user_profile.cpp b/src/system/xam/user_profile.cpp
+index a77f5e6..440167d 100644
+--- a/src/system/xam/user_profile.cpp
++++ b/src/system/xam/user_profile.cpp
+@@ -13,10 +13,19 @@
+ 
+ #include <fmt/format.h>
+ 
++#include <cstdlib>
++
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xam/user_profile.h>
+ 
++REXCVAR_DEFINE_STRING(user_gamertag, "User", "Kernel",
++                      "Gamertag of the signed-in profile (shown online)");
++REXCVAR_DEFINE_STRING(user_xuid, "", "Kernel",
++                      "XUID of the signed-in profile as hex (empty = default). Online "
++                      "servers use it as the account key, so every install needs its own");
++
+ namespace rex {
+ namespace system {
+ namespace xam {
+@@ -27,6 +36,15 @@ UserProfile::UserProfile() {
+   // "You do not have permissions to perform this operation."
+   xuid_ = 0xB13EBABEBABEBABE;
+   name_ = "User";
++  // [online] Per-install identity (set by the launcher).
++  const std::string tag = REXCVAR_GET(user_gamertag);
++  if (!tag.empty()) name_ = tag.substr(0, 15);
++  const std::string xs = REXCVAR_GET(user_xuid);
++  if (!xs.empty()) {
++    const uint64_t v = std::strtoull(xs.c_str(), nullptr, 16);
++    // Bits 54/55 must stay clear (see above), keep the 0xB13E prefix.
++    if (v) xuid_ = 0xB13E000000000000ull | (v & 0x00003FFFFFFFFFFFull);
++  }
+ 
+   // https://cs.rin.ru/forum/viewtopic.php?f=38&t=60668&hilit=gfwl+live&start=195
+   // https://github.com/arkem/py360/blob/master/py360/constants.py
+-- 
+2.43.0
+

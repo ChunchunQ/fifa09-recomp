@@ -1,0 +1,67 @@
+From f81fe08a0480775f21ab19b305beb0c5773a931e Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 14:33:54 +0300
+Subject: [PATCH] local: trace imports in profiling builds too
+
+---
+ include/rex/hook.h | 36 ++++++++++++++++++++++--------------
+ 1 file changed, 22 insertions(+), 14 deletions(-)
+
+diff --git a/include/rex/hook.h b/include/rex/hook.h
+index f2186f0..7bc7985 100644
+--- a/include/rex/hook.h
++++ b/include/rex/hook.h
+@@ -33,28 +33,36 @@
+ // Hook a recompiled function with an auto-marshaled native C++ function.
+ // The native function uses plain types (u32, mapped_u32, etc.) and
+ // HostToGuestFunction handles register translation automatically.
++// [online] Import tracing (trace_imports): logs the first 4 calls of every
++// kernel/XAM import with arguments, result and guest caller.
++#define REX_HOOK_TRACE_BEGIN_                                                  \
++  static std::atomic<uint32_t> rex_trace_count_{0};                            \
++  const bool rex_trace_ = rex::detail::TraceImportsEnabled() &&                \
++                          rex_trace_count_.fetch_add(1) < 4;                   \
++  const uint64_t rex_a_[4] = {ctx.r3.u64, ctx.r4.u64, ctx.r5.u64, ctx.r6.u64}; \
++  const uint32_t rex_lr_ = static_cast<uint32_t>(ctx.lr);
++#define REX_HOOK_TRACE_END_(subroutine)                                                  \
++  if (rex_trace_) {                                                                      \
++    REXKRNL_INFO("[import] {}({:08X}, {:08X}, {:08X}, {:08X}) -> {:08X} from {:08X}",     \
++                 #subroutine, uint32_t(rex_a_[0]), uint32_t(rex_a_[1]), uint32_t(rex_a_[2]), \
++                 uint32_t(rex_a_[3]), uint32_t(ctx.r3.u64), rex_lr_);                    \
++  }
++
+ #ifdef REXGLUE_ENABLE_PROFILING
+ #include <tracy/Tracy.hpp>
+ #define REX_HOOK(subroutine, function)                           \
+   extern "C" REX_FUNC(subroutine) {                              \
+     ZoneNamedN(___tracy_hook_zone, #subroutine, TracyIsStarted); \
++    REX_HOOK_TRACE_BEGIN_                                        \
+     rex::ppc::HostToGuestFunction<function>(ctx, base);          \
++    REX_HOOK_TRACE_END_(subroutine)                              \
+   }
+ #else
+-#define REX_HOOK(subroutine, function)                                         \
+-  extern "C" REX_FUNC(subroutine) {                                            \
+-    static std::atomic<uint32_t> rex_trace_count_{0};                          \
+-    const bool rex_trace_ = rex::detail::TraceImportsEnabled() &&              \
+-                            rex_trace_count_.fetch_add(1) < 4;                 \
+-    const uint64_t rex_a_[4] = {ctx.r3.u64, ctx.r4.u64, ctx.r5.u64, ctx.r6.u64}; \
+-    const uint32_t rex_lr_ = static_cast<uint32_t>(ctx.lr);                    \
+-    rex::ppc::HostToGuestFunction<function>(ctx, base);                        \
+-    if (rex_trace_) {                                                          \
+-      REXKRNL_INFO("[import] {}({:08X}, {:08X}, {:08X}, {:08X}) -> {:08X} from {:08X}", \
+-                   #subroutine, uint32_t(rex_a_[0]), uint32_t(rex_a_[1]),      \
+-                   uint32_t(rex_a_[2]), uint32_t(rex_a_[3]),                   \
+-                   uint32_t(ctx.r3.u64), rex_lr_);                             \
+-    }                                                                          \
++#define REX_HOOK(subroutine, function)                  \
++  extern "C" REX_FUNC(subroutine) {                     \
++    REX_HOOK_TRACE_BEGIN_                               \
++    rex::ppc::HostToGuestFunction<function>(ctx, base); \
++    REX_HOOK_TRACE_END_(subroutine)                     \
+   }
+ #endif
+ 
+-- 
+2.43.0
+

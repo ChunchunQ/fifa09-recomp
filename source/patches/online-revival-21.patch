@@ -1,0 +1,79 @@
+From d5fcae4966860fc8238bf3251dcd31d6ae6d33ff Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 22:44:31 +0300
+Subject: [PATCH] local: log where match packets are sent (relay vs direct) and
+ send errors
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/xam_net.cpp | 32 ++++++++++++++++++++++++++++++--
+ 1 file changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 4840b11..39408b6 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -313,6 +313,30 @@ static uint16_t LogicalLocalPort(uint64_t native) {
+   return port;
+ }
+ 
++// [online] Logs the first packet to each destination (and every failure), so
++// a match that never connects shows where its traffic actually went.
++static void LogSendOnce(const char* how, const void* addr, const void* port, int ret) {
++#if REX_PLATFORM_WIN32
++  int err = ret < 0 ? WSAGetLastError() : 0;
++#else
++  int err = ret < 0 ? errno : 0;
++#endif
++  static std::mutex m;
++  static std::set<uint64_t> seen;
++  const uint8_t* a = static_cast<const uint8_t*>(addr);
++  uint16_t p = uint16_t((uint16_t(static_cast<const uint8_t*>(port)[0]) << 8) |
++                        static_cast<const uint8_t*>(port)[1]);
++  uint32_t a32;
++  std::memcpy(&a32, a, 4);
++  uint64_t key = (uint64_t(a32) << 16) | p;
++  {
++    std::lock_guard<std::mutex> lock(m);
++    if (ret >= 0 && !seen.insert(key).second) return;
++  }
++  REXKRNL_INFO("[online] {} send to {}.{}.{}.{}:{} -> ret {} err {}", how, a[0], a[1], a[2], a[3], p,
++               ret, err);
++}
++
+ // Sends `data` to virtual `to` through the relay. Returns bytes of game data
+ // sent (len) or -1.
+ static int RelaySend(XSocket* sock, const uint8_t* data, uint32_t len, uint32_t flags,
+@@ -337,6 +361,7 @@ static int RelaySend(XSocket* sock, const uint8_t* data, uint32_t len, uint32_t
+   SetRawPort(&relay_to.sin_port, r.port);
+   std::memset(relay_to.x_sin_zero, 0, sizeof(relay_to.x_sin_zero));
+   int ret = sock->SendTo(pkt.data(), uint32_t(pkt.size()), flags, &relay_to, 16);
++  if (to) LogSendOnce("relay", &to->sin_addr, &to->sin_port, ret);
+   return ret < 0 ? -1 : int(len);
+ }
+ 
+@@ -900,7 +925,8 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+     return 0;
+   }
+   ApplyPeerOffsetOut(&native_to);
+-  socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
++  int sent = socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
++  LogSendOnce("direct (WSASendTo)", &native_to.sin_addr, &native_to.sin_port, sent);
+ 
+   // TODO: Instantly complete overlapped
+ 
+@@ -2075,7 +2101,9 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32
+     REXKRNL_INFO("[net-pkt] sendto sock={} dst={} len={} data=[{}]",
+                  socket_handle, dst, buf_len, peek);
+   }
+-  return socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
++  int sent = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
++  LogSendOnce("direct (sendto)", &native_to.sin_addr, &native_to.sin_port, sent);
++  return sent;
+ }
+ 
+ // [online] XNetLogonGetTitleID: the running title's ID (was a stub returning 0,
+-- 
+2.43.0
+

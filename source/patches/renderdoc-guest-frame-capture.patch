@@ -1,0 +1,56 @@
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..c42e2aa 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -31,6 +31,42 @@
+ #include <rex/memory/utils.h>
+ #include <rex/ui/d3d12/d3d12_presenter.h>
+ #include <rex/ui/d3d12/d3d12_util.h>
++#include <rex/ui/renderdoc_api.h>
++
++REXCVAR_DEFINE_BOOL(gpu_capture_next_frame, false, "GPU/Debug",
++                    "RenderDoc: capture the next guest frame (from one swap to the next), "
++                    "then reset. Needs the game launched from RenderDoc.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++namespace {
++// RenderDoc's own capture key (F12) captures one present of the host
++// swapchain, which only contains the presenter's work, not the guest
++// rendering. This brackets a whole guest frame on the device instead.
++void RenderDocCaptureOnSwap(ID3D12Device* device) {
++  static std::unique_ptr<rex::ui::RenderDocAPI> renderdoc =
++      rex::ui::RenderDocAPI::CreateIfConnected();
++  static bool capturing = false;
++  if (!renderdoc) {
++    if (REXCVAR_GET(gpu_capture_next_frame)) {
++      REXCVAR_SET(gpu_capture_next_frame, false);
++      REXGPU_WARN("gpu_capture_next_frame: RenderDoc is not attached, launch the game from RenderDoc");
++    }
++    return;
++  }
++  const RENDERDOC_API_1_0_0* api = renderdoc->api_1_0_0();
++  if (capturing) {
++    capturing = false;
++    uint32_t ok = api->EndFrameCapture(device, nullptr);
++    REXGPU_INFO("RenderDoc: guest frame capture {}", ok ? "saved" : "FAILED");
++  }
++  if (REXCVAR_GET(gpu_capture_next_frame)) {
++    REXCVAR_SET(gpu_capture_next_frame, false);
++    api->StartFrameCapture(device, nullptr);
++    capturing = true;
++    REXGPU_INFO("RenderDoc: capturing the next guest frame");
++  }
++}
++}  // namespace
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_bindless, true, "GPU/D3D12", "Use bindless resources where available")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -2254,6 +2290,8 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+   // End the frame even if did not present for any reason (the image refresher
+   // was not called), to prevent leaking per-frame resources.
+   EndSubmission(true);
++
++  RenderDocCaptureOnSwap(GetD3D12Provider().GetDevice());
+ }
+ 
+ void D3D12CommandProcessor::OnPrimaryBufferEnd() {

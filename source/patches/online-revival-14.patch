@@ -1,0 +1,457 @@
+From 8b18f3e6e5a13558e36648b9e19afbf10708be9d Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 17:36:59 +0300
+Subject: [PATCH] local: UDP receive (WSARecvFrom/WSAGetOverlappedResult),
+ sockaddr byte order, same-PC port offsets
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/xam_net.cpp | 298 +++++++++++++++++++++++++++++++++++--
+ src/system/xsocket.cpp     |  18 ++-
+ 2 files changed, 296 insertions(+), 20 deletions(-)
+
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 27411b3..d3997ad 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -12,8 +12,16 @@
+ // Disable warnings about unused parameters for kernel functions
+ #pragma GCC diagnostic ignored "-Wunused-parameter"
+ 
++#include <algorithm>
++#include <atomic>
++#include <cerrno>
++#include <chrono>
+ #include <cstdio>
+ #include <cstring>
++#include <mutex>
++#include <set>
++#include <thread>
++#include <vector>
+ 
+ #if REX_PLATFORM_MAC
+ #include <sys/select.h>
+@@ -62,6 +70,14 @@ REXCVAR_DEFINE_BOOL(trace_imports, false, "Net",
+                     "Debugging: log the first calls of every kernel/XAM import "
+                     "(arguments, result, guest caller)")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_INT32(online_port_offset, 0, "Net",
++                     "Two game instances on ONE PC: this instance binds its game ports "
++                     "(UDP 6000, 3659, ...) shifted by this amount so both can run")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++REXCVAR_DEFINE_INT32(online_peer_port_offset, 0, "Net",
++                     "Two game instances on ONE PC: port offset of the OTHER instance, added "
++                     "to ports of game packets sent to this PC (loopback/own address)")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(net_packet_log, false, "Net",
+                     "Log every socket call, DNS lookup and XLIVEBASE message the game "
+                     "makes (destination, length, first 16 bytes)")
+@@ -149,6 +165,58 @@ static uint32_t PrimaryLocalIPv4NBO() {
+ #endif
+ }
+ 
++// ---------------------------------------------------------------------------
++// [online] Same-PC testing: port offsets.
++// Two instances on one PC cannot both bind UDP 6000/3659. With
++// online_port_offset=N an instance binds port+N instead (and reports the
++// unshifted port to the game); packets sent to this PC (loopback or our own
++// address) get online_peer_port_offset added to the destination port, and
++// packets received from this PC have it subtracted from their source port.
++// Both default to 0, which changes nothing.
++static int OwnPortOffset() { return REXCVAR_GET(online_port_offset); }
++static int PeerPortOffset() { return REXCVAR_GET(online_peer_port_offset); }
++
++static uint32_t CachedLocalIPv4NBO() {
++  static uint32_t ip = PrimaryLocalIPv4NBO();
++  return ip;
++}
++
++// addr: 4 raw network-order bytes.
++static bool IsThisMachine(const void* addr) {
++  const uint8_t* a = static_cast<const uint8_t*>(addr);
++  if (a[0] == 127) return true;
++  uint32_t local = CachedLocalIPv4NBO();
++  return std::memcmp(a, &local, 4) == 0;
++}
++
++static uint16_t RawPort(const void* p) {
++  const uint8_t* b = static_cast<const uint8_t*>(p);
++  return uint16_t((uint16_t(b[0]) << 8) | b[1]);
++}
++static void SetRawPort(void* p, uint16_t port) {
++  uint8_t* b = static_cast<uint8_t*>(p);
++  b[0] = uint8_t(port >> 8);
++  b[1] = uint8_t(port & 0xFF);
++}
++
++static std::mutex g_offset_ports_mutex;
++static std::set<uint16_t> g_offset_ports;  // actual (shifted) ports we bound
++
++// Outgoing packet to this PC: shift the destination port to the peer instance.
++static void ApplyPeerOffsetOut(N_XSOCKADDR_IN* to) {
++  int off = PeerPortOffset();
++  if (!to || !off || !IsThisMachine(&to->sin_addr)) return;
++  uint16_t port = RawPort(&to->sin_port);
++  if (port) SetRawPort(&to->sin_port, uint16_t(port + off));
++}
++// Incoming packet from this PC: undo the peer's shift on the source port.
++static void ApplyPeerOffsetIn(N_XSOCKADDR_IN* from) {
++  int off = PeerPortOffset();
++  if (!from || !off || !IsThisMachine(&from->sin_addr)) return;
++  uint16_t port = RawPort(&from->sin_port);
++  if (port > off) SetRawPort(&from->sin_port, uint16_t(port - off));
++}
++
+ // https://github.com/G91/TitanOffLine/blob/1e692d9bb9dfac386d08045ccdadf4ae3227bb5e/xkelib/xam/xamNet.h
+ enum {
+   XNCALLER_INVALID = 0x0,
+@@ -402,25 +470,203 @@ u32 NetDll_WSAGetLastError_entry() {
+   return e;
+ }
+ 
++// [online] Receiving UDP game traffic (the peer-to-peer link). EA's socket
++// layer posts one overlapped WSARecvFrom per UDP socket, waits on the
++// overlapped event and collects the result with WSAGetOverlappedResult. The
++// old stub always failed, so nothing sent by the other player ever arrived.
++// Data already waiting is returned at once; otherwise a host thread waits for
++// the next datagram, fills the guest buffers/overlapped and sets the event.
++static constexpr uint32_t kStatusPending = 0x103;
++static constexpr uint32_t kWsaIoPending = 997;
++static constexpr uint32_t kWsaIoIncomplete = 996;
++
++struct PendingRecv {
++  uint64_t native = 0;
++  std::vector<std::pair<uint32_t, uint32_t>> bufs;  // guest ptr, len
++  uint32_t from_ptr = 0, fromlen_ptr = 0, overlapped_ptr = 0, bytes_ptr = 0;
++};
++
++static int NativeLastError() {
++#if REX_PLATFORM_WIN32
++  return WSAGetLastError();
++#else
++  return errno;
++#endif
++}
++static bool WouldBlock(int err) {
++#if REX_PLATFORM_WIN32
++  return err == WSAEWOULDBLOCK;
++#else
++  return err == EAGAIN || err == EWOULDBLOCK;
++#endif
++}
++
++// One native recvfrom; scatters into the guest buffers. Returns bytes, or -1
++// with *err set.
++static int RecvIntoGuest(const PendingRecv& r, int* err) {
++  size_t total = 0;
++  for (auto& b : r.bufs) total += b.second;
++  if (total == 0 || total > 0x10000) total = 0x10000;
++  std::vector<uint8_t> tmp(total);
++  sockaddr_in from = {};
++#if REX_PLATFORM_WIN32
++  int flen = static_cast<int>(sizeof(from));
++  int n = ::recvfrom(static_cast<SOCKET>(r.native), reinterpret_cast<char*>(tmp.data()),
++                     static_cast<int>(total), 0, reinterpret_cast<sockaddr*>(&from), &flen);
++#else
++  socklen_t flen = sizeof(from);
++  int n = static_cast<int>(::recvfrom(static_cast<int>(r.native), tmp.data(), total, 0,
++                                      reinterpret_cast<sockaddr*>(&from), &flen));
++#endif
++  if (n < 0) {
++    *err = NativeLastError();
++    return -1;
++  }
++  auto* mem = REX_KERNEL_MEMORY();
++  size_t off = 0;
++  for (auto& b : r.bufs) {
++    if (off >= size_t(n)) break;
++    size_t c = std::min<size_t>(b.second, size_t(n) - off);
++    std::memcpy(mem->TranslateVirtual<uint8_t*>(b.first), tmp.data() + off, c);
++    off += c;
++  }
++  if (r.from_ptr) {
++    uint8_t* f = mem->TranslateVirtual<uint8_t*>(r.from_ptr);
++    N_XSOCKADDR_IN nf;
++    nf.sin_family = AF_INET;
++    std::memcpy(&nf.sin_addr, &from.sin_addr.s_addr, 4);
++    std::memcpy(&nf.sin_port, &from.sin_port, 2);
++    ApplyPeerOffsetIn(&nf);
++    memory::store_and_swap<uint16_t>(f + 0, 2);  // AF_INET
++    std::memcpy(f + 2, &nf.sin_port, 2);
++    std::memcpy(f + 4, &nf.sin_addr, 4);
++    std::memset(f + 8, 0, 8);
++    if (PacketLogEnabled()) {
++      char src[48], peek[64];
++      FormatSockaddr(&nf, src, sizeof(src));
++      FormatHexPeek(tmp.data(), static_cast<size_t>(n), peek, sizeof(peek));
++      REXKRNL_INFO("[net-pkt] WSARecvFrom src={} len={} data=[{}]", src, n, peek);
++    }
++  }
++  if (r.fromlen_ptr) {
++    memory::store_and_swap<uint32_t>(mem->TranslateVirtual<uint8_t*>(r.fromlen_ptr), 16);
++  }
++  return n;
++}
++
++static void CompleteOverlapped(uint32_t overlapped_ptr, uint32_t status, uint32_t bytes) {
++  if (!overlapped_ptr) return;
++  auto* ov = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(overlapped_ptr);
++  ov->internal_high = bytes;
++  std::atomic_thread_fence(std::memory_order_seq_cst);
++  ov->internal = status;
++  std::atomic_thread_fence(std::memory_order_seq_cst);
++  uint32_t ev_handle = ov->event_handle;
++  if (ev_handle) {
++    auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(ev_handle);
++    if (ev) ev->Set(0, false);
++  }
++}
++
+ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
+                              u32 buffer_count, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
+-                             ppc_ptr_t<XSOCKADDR_IN> from_addr,
++                             ppc_ptr_t<XSOCKADDR_IN> from_addr, mapped_u32 fromlen_ptr,
+                              ppc_ptr_t<XWSAOVERLAPPED> overlapped_ptr,
+                              mapped_void completion_routine_ptr) {
+-  if (overlapped_ptr) {
+-    // auto evt = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(
+-    //    overlapped_ptr->event_handle);
+-
+-    // if (evt) {
+-    //  //evt->Set(0, false);
+-    //}
++  // (The old prototype was missing lpFromlen, which shifted the overlapped
++  // pointer by one argument.)
++  auto sock = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(socket);
++  if (!sock) {
++    XThread::SetLastError(0x2736);  // WSAENOTSOCK
++    return -1;
++  }
++  PendingRecv r;
++  r.native = sock->native_handle();
++  for (uint32_t i = 0; i < buffer_count && i < 16; ++i) {
++    r.bufs.emplace_back(uint32_t(buffers_ptr[i].buf_ptr), uint32_t(buffers_ptr[i].len));
++  }
++  r.from_ptr = from_addr.guest_address();
++  r.overlapped_ptr = overlapped_ptr.guest_address();
++  r.bytes_ptr = num_bytes_recv.guest_address();
++  r.fromlen_ptr = fromlen_ptr.guest_address();
++
++  int err = 0;
++  int n = RecvIntoGuest(r, &err);
++  if (n >= 0) {
++    if (num_bytes_recv) *num_bytes_recv = uint32_t(n);
++    if (flags_ptr) *flags_ptr = 0;
++    CompleteOverlapped(r.overlapped_ptr, 0, uint32_t(n));
++    return 0;
++  }
++  if (!WouldBlock(err) || !r.overlapped_ptr) {
++    XThread::SetLastError(WouldBlock(err) ? 0x2733 : uint32_t(err));
++    return -1;
+   }
+ 
+-  // we're not going to be receiving packets any time soon
+-  // return error so we don't wait on that - Cancerous
++  // Nothing yet: complete asynchronously.
++  auto* ov = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(r.overlapped_ptr);
++  ov->internal_high = 0;
++  ov->internal = kStatusPending;
++  std::thread([r]() {
++    for (;;) {
++      fd_set rf;
++      FD_ZERO(&rf);
++#if REX_PLATFORM_WIN32
++      FD_SET(static_cast<SOCKET>(r.native), &rf);
++      int sel = ::select(0, &rf, nullptr, nullptr, nullptr);
++#else
++      FD_SET(static_cast<int>(r.native), &rf);
++      int sel = ::select(static_cast<int>(r.native) + 1, &rf, nullptr, nullptr, nullptr);
++#endif
++      if (sel < 0) {
++        CompleteOverlapped(r.overlapped_ptr, 995 /* WSA_OPERATION_ABORTED */, 0);
++        return;
++      }
++      int e = 0;
++      int got = RecvIntoGuest(r, &e);
++      if (got >= 0) {
++        CompleteOverlapped(r.overlapped_ptr, 0, uint32_t(got));
++        return;
++      }
++      if (!WouldBlock(e)) {
++        CompleteOverlapped(r.overlapped_ptr, uint32_t(e), 0);
++        return;
++      }
++    }
++  }).detach();
++  XThread::SetLastError(kWsaIoPending);
+   return -1;
+ }
+ 
++u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket,
++                                        ppc_ptr_t<XWSAOVERLAPPED> overlapped,
++                                        mapped_u32 bytes_transferred, u32 wait,
++                                        mapped_u32 flags_ptr) {
++  if (!overlapped) {
++    XThread::SetLastError(87);
++    return 0;
++  }
++  uint32_t status = overlapped->internal;
++  if (status == kStatusPending && wait) {
++    // Rare: block until the receive thread completes it.
++    for (int i = 0; i < 5000 && overlapped->internal == kStatusPending; ++i) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    status = overlapped->internal;
++  }
++  if (status == kStatusPending) {
++    XThread::SetLastError(kWsaIoIncomplete);
++    return 0;
++  }
++  if (status != 0) {
++    XThread::SetLastError(status);
++    return 0;
++  }
++  if (bytes_transferred) *bytes_transferred = uint32_t(overlapped->internal_high);
++  if (flags_ptr) *flags_ptr = 0;
++  return 1;
++}
++
+ // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
+ // is the unencrypted game data.
+ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buffers,
+@@ -453,6 +699,7 @@ u32 NetDll_WSASendTo_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XWSABUF> buf
+   }
+ 
+   N_XSOCKADDR_IN native_to(to_ptr);
++  ApplyPeerOffsetOut(&native_to);
+   socket->SendTo(combined_buffer_mem.data(), combined_buffer_size, flags, &native_to, to_len);
+ 
+   // TODO: Instantly complete overlapped
+@@ -579,12 +826,15 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+   }
+   addr_ptr->ina.s_addr = local_ip;
+   addr_ptr->inaOnline.s_addr = online_ip;
+-  addr_ptr->wPortOnline = 34643;  // plain value; guest reads big-endian.
++  // plain value; guest reads big-endian. Offset so two instances on one PC
++  // have different addresses.
++  addr_ptr->wPortOnline = uint16_t(34643 + OwnPortOffset());
+ 
+   // TODO(gibbed): A proper mac address.
+   // RakNet's 360 version appears to depend on abEnet to create "random" 64-bit
+   // numbers. A zero value will cause RakPeer::Startup to fail.
+   std::memset(addr_ptr->abEnet, 0xCC, 6);
++  addr_ptr->abEnet[5] = uint8_t(0xCC ^ OwnPortOffset());
+   std::memset(addr_ptr->abOnline, 0, 20);
+ 
+   // Rate-limited: the game may poll this many times; log the first call and
+@@ -621,8 +871,9 @@ void OnlineFillTitleXnAddr(uint8_t* out) {
+   }
+   a.ina.s_addr = local_ip;
+   a.inaOnline.s_addr = online_ip;
+-  a.wPortOnline = 34643;
++  a.wPortOnline = uint16_t(34643 + OwnPortOffset());
+   std::memset(a.abEnet, 0xCC, 6);
++  a.abEnet[5] = uint8_t(0xCC ^ OwnPortOffset());
+   std::memcpy(out, &a, sizeof(a));
+ }
+ 
+@@ -1101,6 +1352,17 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
+   }
+ 
+   N_XSOCKADDR_IN native_name(name);
++  {
++    int off = OwnPortOffset();
++    uint16_t port = RawPort(&native_name.sin_port);
++    // Only shift the game's fixed UDP/VDP ports (not 0 = "any port").
++    if (off && port) {
++      uint16_t shifted = uint16_t(port + off);
++      SetRawPort(&native_name.sin_port, shifted);
++      std::lock_guard<std::mutex> lock(g_offset_ports_mutex);
++      g_offset_ports.insert(shifted);
++    }
++  }
+   if (PacketLogEnabled()) {
+     char addr[48];
+     FormatSockaddr(&native_name, addr, sizeof(addr));
+@@ -1232,6 +1494,14 @@ u32 NetDll_getsockname_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_
+     // network-order port/addr; only the family needs host->big-endian.
+     uint8_t* p = reinterpret_cast<uint8_t*>(name.host_address());
+     memory::store_and_swap<uint16_t>(p + 0, 2 /* AF_INET */);
++    {
++      // [online] Report the unshifted port for ports moved by online_port_offset.
++      uint16_t port = ntohs(local.sin_port);
++      std::lock_guard<std::mutex> lock(g_offset_ports_mutex);
++      if (OwnPortOffset() && g_offset_ports.count(port)) {
++        local.sin_port = htons(uint16_t(port - OwnPortOffset()));
++      }
++    }
+     std::memcpy(p + 2, &local.sin_port, 2);
+     std::memcpy(p + 4, &local.sin_addr.s_addr, 4);
+   }
+@@ -1468,6 +1738,7 @@ u32 NetDll_recvfrom_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u3
+   uint32_t native_fromlen = fromlen_ptr ? fromlen_ptr.value() : 0;
+   int ret =
+       socket->RecvFrom(buf_ptr, buf_len, flags, &native_from, fromlen_ptr ? &native_fromlen : 0);
++  if (ret >= 0) ApplyPeerOffsetIn(&native_from);
+ 
+   if (from_ptr) {
+     from_ptr->sin_family = native_from.sin_family;
+@@ -1526,6 +1797,7 @@ u32 NetDll_sendto_entry(u32 caller, u32 socket_handle, mapped_void buf_ptr, u32
+   }
+ 
+   N_XSOCKADDR_IN native_to(to_ptr);
++  ApplyPeerOffsetOut(&native_to);
+   if (PacketLogEnabled()) {
+     char dst[48], peek[64];
+     FormatSockaddr(&native_to, dst, sizeof(dst));
+@@ -1627,7 +1899,7 @@ REX_EXPORT_STUB(__imp__NetDll_UpnpSearchGetDevices);
+ REX_EXPORT_STUB(__imp__NetDll_UpnpStartup);
+ REX_EXPORT_STUB(__imp__NetDll_WSACancelOverlappedIO);
+ REX_EXPORT_STUB(__imp__NetDll_WSAEventSelect);
+-REX_EXPORT_STUB(__imp__NetDll_WSAGetOverlappedResult);
++REX_EXPORT(__imp__NetDll_WSAGetOverlappedResult, rex::kernel::xam::NetDll_WSAGetOverlappedResult_entry)
+ REX_EXPORT_STUB(__imp__NetDll_WSARecv);
+ REX_EXPORT_STUB(__imp__NetDll_WSASend);
+ REX_EXPORT_STUB(__imp__NetDll_WSAStartupEx);
+diff --git a/src/system/xsocket.cpp b/src/system/xsocket.cpp
+index 2d13ac8..4e62c13 100644
+--- a/src/system/xsocket.cpp
++++ b/src/system/xsocket.cpp
+@@ -190,10 +190,11 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
+   socklen_t nfromlen = sizeof(sockaddr_in);
+   int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+                      (sockaddr*)&nfrom, &nfromlen);
+-  if (from) {
++  if (from && ret >= 0) {
++    // [online] Raw network-order copies (the port used to come out swapped).
+     from->sin_family = nfrom.sin_family;
+-    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
+-    from->sin_port = nfrom.sin_port;
++    std::memcpy(&from->sin_addr, &nfrom.sin_addr.s_addr, 4);
++    std::memcpy(&from->sin_port, &nfrom.sin_port, 2);
+     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
+   }
+ 
+@@ -221,11 +222,14 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
+   }
+   */
+ 
+-  sockaddr_in nto;
++  // [online] Copy address and port as raw network-order bytes. Assigning the
++  // big-endian wrappers to the native fields converted them to host order,
++  // so 127.0.0.1:6000 went out as 1.0.0.127:28695.
++  sockaddr_in nto = {};
+   if (to) {
+-    nto.sin_addr.s_addr = to->sin_addr;
+-    nto.sin_family = to->sin_family;
+-    nto.sin_port = to->sin_port;
++    nto.sin_family = AF_INET;
++    std::memcpy(&nto.sin_addr.s_addr, &to->sin_addr, 4);
++    std::memcpy(&nto.sin_port, &to->sin_port, 2);
+   }
+ 
+   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+-- 
+2.43.0
+

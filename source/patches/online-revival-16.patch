@@ -1,0 +1,332 @@
+From 9d1a9dcb658bc7f6ae013971fc52c7cd8c96d301 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 17:49:45 +0300
+Subject: [PATCH] local: XGI buffer-size asserts removed, arbitration
+ registrants, mute list query
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/apps/xgi_app.cpp       | 98 ++++++++++++++++++++-------
+ src/kernel/xam/apps/xlivebase_app.cpp |  5 ++
+ 2 files changed, 79 insertions(+), 24 deletions(-)
+
+diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
+index 282dffd..a4623ed 100644
+--- a/src/kernel/xam/apps/xgi_app.cpp
++++ b/src/kernel/xam/apps/xgi_app.cpp
+@@ -13,8 +13,11 @@
+ 
+ #include <chrono>
+ #include <cstring>
++#include <algorithm>
++#include <vector>
+ #include <rex/logging.h>
+ #include <rex/thread.h>
++#include <rex/system/xam/user_profile.h>
+ 
+ namespace rex {
+ namespace kernel {
+@@ -41,6 +44,15 @@ static void OnlineRandomBytes(uint8_t* out, size_t n) {
+   }
+ }
+ 
++// [online] XUIDs of the players in the current session (local + remote), so
++// XSessionArbitrationRegister can return the registrant list ranked games need.
++static std::vector<uint64_t> g_session_xuids;
++static void AddSessionXuid(uint64_t xuid) {
++  if (!xuid) return;
++  for (auto x : g_session_xuids) if (x == xuid) return;
++  g_session_xuids.push_back(xuid);
++}
++
+ XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
+ 
+ // http://mb.mirage.org/bugzilla/xliveless/main.c
+@@ -51,7 +63,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+   auto buffer = memory_->TranslateVirtual(buffer_ptr);
+   switch (message) {
+     case 0x000B0006: {
+-      assert_true(!buffer_length || buffer_length == 24);
++      // [online] (was an assert: buffer_length == 24; FIFA 09 sends other sizes)
+       // dword r3 user index
+       // dword (unwritten?)
+       // qword 0
+@@ -80,7 +92,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       REXKRNL_INFO("XGIUserWriteAchievements called: buf_len={} raw[0]={:08X} raw[4]={:08X}",
+                    buffer_length, raw0, raw4);
+ 
+-      assert_true(!buffer_length || buffer_length == 8);
++      // [online] (was an assert: buffer_length == 8; FIFA 09 sends other sizes)
+       uint32_t achievement_count = raw0;
+       uint32_t achievements_ptr = raw4;
+ 
+@@ -114,7 +126,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0010: {
+-      assert_true(!buffer_length || buffer_length == 28);
++      // [online] (was an assert: buffer_length == 28; FIFA 09 sends other sizes)
+       // Sequence:
+       // - XamSessionCreateHandle
+       // - XamSessionRefObjByHandle
+@@ -138,6 +150,8 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       // XNKEY keyExchangeKey[16] } and a nonce: the game publishes them to the
+       // lobby (gset SESS=/PLATPARAMS=) so the other player can join. Joiners
+       // pass the host's info in, so it is left untouched for them.
++      g_session_xuids.clear();
++      if (kernel_state_->user_profile()) AddSessionXuid(kernel_state_->user_profile()->xuid());
+       if ((flags & 1) && session_info_ptr) {
+         uint8_t* info = memory_->TranslateVirtual<uint8_t*>(session_info_ptr);
+         OnlineRandomBytes(info, 8);
+@@ -157,7 +171,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0011: {
+-      assert_true(!buffer_length || buffer_length == 16);
++      // [online] (was an assert: buffer_length == 16; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -168,7 +182,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0012: {
+-      assert_true(!buffer_length || buffer_length == 20);
++      // [online] (was an assert: buffer_length == 20; FIFA 09 sends other sizes)
+       uint32_t session_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t user_count = memory::load_and_swap<uint32_t>(buffer + 4);
+       uint32_t xuid_array_ptr = memory::load_and_swap<uint32_t>(buffer + 8);
+@@ -179,10 +193,20 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       REXKRNL_DEBUG("{}({:08X}, {}, {}, {:08X}, {:08X})",
+                     is_local ? "XGISessionJoinLocal" : "XGISessionJoinRemote", session_ptr,
+                     user_count, xuid_array_ptr, user_index_array, private_slots_array);
++      if (is_local) {
++        if (kernel_state_->user_profile()) AddSessionXuid(kernel_state_->user_profile()->xuid());
++      } else {
++        for (uint32_t i = 0; i < user_count && i < 16; ++i) {
++          AddSessionXuid(memory::load_and_swap<uint64_t>(
++              memory_->TranslateVirtual(xuid_array_ptr + i * 8)));
++        }
++      }
++      REXKRNL_INFO("[online] {}: {} player(s) in session", is_local ? "XSessionJoinLocal"
++                   : "XSessionJoinRemote", g_session_xuids.size());
+       return X_E_SUCCESS;
+     }
+     case 0x000B0014: {
+-      assert_true(!buffer_length || buffer_length == 16);
++      // [online] (was an assert: buffer_length == 16; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -194,7 +218,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+     }
+     case 0x000B0015: {
+       // send high scores?
+-      assert_true(!buffer_length || buffer_length == 16);
++      // [online] (was an assert: buffer_length == 16; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -205,7 +229,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0016: {
+-      assert_true(!buffer_length || buffer_length == 32);
++      // [online] (was an assert: buffer_length == 32; FIFA 09 sends other sizes)
+ 
+       uint32_t proc_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -223,7 +247,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0018: {
+-      assert_true(!buffer_length || buffer_length == 16);
++      // [online] (was an assert: buffer_length == 16; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -236,7 +260,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B001C: {
+-      assert_true(!buffer_length || buffer_length == 36);
++      // [online] (was an assert: buffer_length == 36; FIFA 09 sends other sizes)
+ 
+       // session_search
+       uint32_t proc_index = memory::load_and_swap<uint32_t>(buffer + 0);
+@@ -258,7 +282,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B001D: {
+-      assert_true(!buffer_length || buffer_length == 24);
++      // [online] (was an assert: buffer_length == 24; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t details_buffer_size = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -273,7 +297,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B001E: {
+-      assert_true(!buffer_length || buffer_length == 24);
++      // [online] (was an assert: buffer_length == 24; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t session_info_ptr = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -288,7 +312,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0019: {
+-      assert_true(!buffer_length || buffer_length == 8);
++      // [online] (was an assert: buffer_length == 8; FIFA 09 sends other sizes)
+ 
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t session_info_ptr = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -299,7 +323,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B001A: {
+-      assert_true(!buffer_length || buffer_length == 28);
++      // [online] (was an assert: buffer_length == 28; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t flags = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -311,11 +335,37 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       REXKRNL_DEBUG("XSessionArbitrationRegister({:08X}, {:08X}, {:016X}, {:08X}, {:08X}, {:08X})",
+                     obj_ptr, flags, session_nonce, session_duration_sec, results_buffer_size,
+                     results_ptr);
++      // [online] Fill XSESSION_REGISTRATION_RESULTS { WORD wNumRegistrants;
++      // XSESSION_REGISTRANT* rgRegistrants; } with one registrant per player:
++      // { ULONGLONG qwMachineID; DWORD bTrustworthiness; DWORD bNumUsers;
++      //   XUID* rgUsers; } (24 bytes). An empty result made the game drop the
++      // session ("session is no longer available").
++      if (results_ptr && results_buffer_size >= 8) {
++        uint8_t* res = memory_->TranslateVirtual(results_ptr);
++        uint32_t count = uint32_t(g_session_xuids.size());
++        uint32_t need = 8 + count * 24 + count * 8;
++        if (need > results_buffer_size) count = (results_buffer_size - 8) / 32;
++        std::memset(res, 0, std::min<uint32_t>(results_buffer_size, 8 + count * 32));
++        memory::store_and_swap<uint16_t>(res + 0, uint16_t(count));
++        uint32_t reg_ptr = results_ptr + 8;
++        uint32_t xuid_ptr = reg_ptr + count * 24;
++        memory::store_and_swap<uint32_t>(res + 4, count ? reg_ptr : 0);
++        for (uint32_t i = 0; i < count; ++i) {
++          uint8_t* r = memory_->TranslateVirtual(reg_ptr + i * 24);
++          memory::store_and_swap<uint64_t>(r + 0, g_session_xuids[i]);  // machine id
++          memory::store_and_swap<uint32_t>(r + 8, 1);                    // trustworthy
++          memory::store_and_swap<uint32_t>(r + 12, 1);                   // one user
++          memory::store_and_swap<uint32_t>(r + 16, xuid_ptr + i * 8);
++          memory::store_and_swap<uint64_t>(memory_->TranslateVirtual(xuid_ptr + i * 8),
++                                           g_session_xuids[i]);
++        }
++        REXKRNL_INFO("[online] XSessionArbitrationRegister: {} registrant(s)", count);
++      }
+ 
+       return X_E_SUCCESS;
+     }
+     case 0x000B001B: {
+-      assert_true(!buffer_length || buffer_length == 32);
++      // [online] (was an assert: buffer_length == 32; FIFA 09 sends other sizes)
+ 
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t num_session_ids = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -333,7 +383,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B001F: {
+-      assert_true(!buffer_length || buffer_length == 24);
++      // [online] (was an assert: buffer_length == 24; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t array_count = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -348,7 +398,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0020: {
+-      assert_true(!buffer_length || buffer_length == 8);
++      // [online] (was an assert: buffer_length == 8; FIFA 09 sends other sizes)
+ 
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t view_id = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -358,7 +408,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0021: {
+-      assert_true(!buffer_length || buffer_length == 28);
++      // [online] (was an assert: buffer_length == 28; FIFA 09 sends other sizes)
+ 
+       uint32_t title_id = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t xuids_count = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -374,7 +424,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0025: {
+-      assert_true(!buffer_length || buffer_length == 20);
++      // [online] (was an assert: buffer_length == 20; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint64_t xuid = memory::load_and_swap<uint64_t>(buffer + 4);
+@@ -387,7 +437,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0026: {
+-      assert_true(!buffer_length || buffer_length == 20);
++      // [online] (was an assert: buffer_length == 20; FIFA 09 sends other sizes)
+ 
+       uint32_t obj_ptr = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint64_t xuid = memory::load_and_swap<uint64_t>(buffer + 4);
+@@ -408,7 +458,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_FAIL;
+     }
+     case 0x000B003D: {
+-      assert_true(!buffer_length || buffer_length == 16);
++      // [online] (was an assert: buffer_length == 16; FIFA 09 sends other sizes)
+ 
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t AnId_buffer_size = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -421,7 +471,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0041: {
+-      assert_true(!buffer_length || buffer_length == 32);
++      // [online] (was an assert: buffer_length == 32; FIFA 09 sends other sizes)
+       // 00000000 2789fecc 00000000 00000000 200491e0 00000000 200491f0 20049340
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t context_ptr = memory::load_and_swap<uint32_t>(buffer + 16);
+@@ -436,7 +486,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_FAIL;
+     }
+     case 0x000B0060: {
+-      assert_true(!buffer_length || buffer_length == 32);
++      // [online] (was an assert: buffer_length == 32; FIFA 09 sends other sizes)
+ 
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t num_session_ids = memory::load_and_swap<uint32_t>(buffer + 4);
+@@ -454,7 +504,7 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+       return X_E_SUCCESS;
+     }
+     case 0x000B0065: {
+-      assert_true(!buffer_length || buffer_length == 52);
++      // [online] (was an assert: buffer_length == 52; FIFA 09 sends other sizes)
+ 
+       uint32_t proc_index = memory::load_and_swap<uint32_t>(buffer + 0);
+       uint32_t user_index = memory::load_and_swap<uint32_t>(buffer + 4);
+diff --git a/src/kernel/xam/apps/xlivebase_app.cpp b/src/kernel/xam/apps/xlivebase_app.cpp
+index fd50b75..2ca715c 100644
+--- a/src/kernel/xam/apps/xlivebase_app.cpp
++++ b/src/kernel/xam/apps/xlivebase_app.cpp
+@@ -171,6 +171,11 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message, uint32_t buffer_pt
+       REXKRNL_DEBUG("XLiveBaseUnk58046({:08X}, {:08X}) unimplemented", buffer_ptr, buffer_length);
+       return X_E_SUCCESS;
+     }
++    case 0x0005800E: {
++      // [online] XUserMuteListQuery: nobody is muted.
++      REXKRNL_DEBUG("XUserMuteListQuery({:08X}, {:08X})", buffer_ptr, buffer_length);
++      return X_E_SUCCESS;
++    }
+     case 0x00058037: {
+       REXKRNL_DEBUG("XPresenceInitialize({:08X}, {:08X})", buffer_ptr, buffer_length);
+       return X_E_SUCCESS;
+-- 
+2.43.0
+

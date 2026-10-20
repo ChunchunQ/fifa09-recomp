@@ -1,0 +1,591 @@
+# [online] Debug probes inside the game's EA session code (see src/online_hooks.h).
+# Each probe logs a line starting with "[sesdbg]".
+
+# game manager: game update event (r3 = manager, r4 = game info)
+[[midasm_hook]]
+address = 0x831b6a40
+name = "SesDbg_GameUpdate"
+registers = ["r3", "r4"]
+
+# OSDK receive dispatcher entry, before the 'osdk' type check.
+[[midasm_hook]]
+address = 0x82c84fc8
+name = "SesDbg_OsdkEntry"
+registers = ["r3", "r4", "r5"]
+
+# OSDK peer message receive dispatcher, after the 'osdk' type check
+# (team play lobby REQ/USET/ASET, 1v1 HSK/HSR); logs "[osdk] recv"
+[[midasm_hook]]
+address = 0x82c84fec
+name = "SesDbg_OsdkRecv"
+registers = ["r3", "r7", "r8", "r9"]
+
+# game manager: start session for a newly started game
+[[midasm_hook]]
+address = 0x831b6650
+name = "SesDbg_GameStart"
+registers = ["r3", "r4"]
+
+# ... result of the session manager 'idle' status query
+[[midasm_hook]]
+address = 0x831b66ac
+name = "SesDbg_IdleResult"
+registers = ["r3"]
+
+# ... host/joiner decision (r11: 1 = we are host, 6 = joiner)
+[[midasm_hook]]
+address = 0x831b683c
+name = "SesDbg_HostDecision"
+registers = ["r11"]
+
+# session manager: host creates the session
+[[midasm_hook]]
+address = 0x82879700
+name = "SesDbg_HostSession"
+registers = ["r3", "r5", "r7"]
+
+# session manager: joiner joins the session
+[[midasm_hook]]
+address = 0x82879798
+name = "SesDbg_JoinSession"
+registers = ["r3", "r5", "r7"]
+
+# session manager control (selector four-cc in r4)
+[[midasm_hook]]
+address = 0x82878980
+name = "SesDbg_Control"
+registers = ["r3", "r4", "r5", "r6"]
+
+# XSession manager control (selector four-cc in r4)
+[[midasm_hook]]
+address = 0x82884430
+name = "SesDbg_XControl"
+registers = ["r3", "r4", "r5", "r6"]
+
+# XSession create path entry
+[[midasm_hook]]
+address = 0x82883978
+name = "SesDbg_CreateEntry"
+registers = ["r3", "r4", "r5"]
+
+# XSession create path: result of the user lookup before XSessionCreate
+[[midasm_hook]]
+address = 0x82883a1c
+name = "SesDbg_CreateUser"
+registers = ["r3"]
+
+# XSession create path: result of XSessionCreate
+[[midasm_hook]]
+address = 0x82883a88
+name = "SesDbg_CreateResult"
+registers = ["r3"]
+
+# game manager: session status event (host publishes SESS via gset here)
+[[midasm_hook]]
+address = 0x831b7afc
+name = "SesDbg_SessionEvent"
+registers = ["r3", "r4", "r12", "r1"]
+
+# --- Receive-path rate probes (active only when NOBK_DIAG=1) ---
+# These were previously defined in online_hooks.h but not registered, so their
+# zero counters in [netdbg] did not indicate a stalled session/callback.
+[[midasm_hook]]
+address = 0x82853340
+name = "NetDbg_Update"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x82853410
+name = "NetDbg_UpdateLoop"
+registers = ["r29"]
+
+[[midasm_hook]]
+address = 0x8284bbe0
+name = "NetDbg_RecvLoop"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x8284bc0c
+name = "NetDbg_RecvPackets"
+registers = ["r27"]
+
+[[midasm_hook]]
+address = 0x8287e610
+name = "NetDbg_CbRecv"
+registers = ["r11"]
+
+[[midasm_hook]]
+address = 0x8287e540
+name = "NetDbg_CbIdle"
+registers = ["r9"]
+
+# --- CommUDP game link (port 3659) ---
+# a datagram was read for a CommUDP ref (r31 = ref, r3 = length, r1+0x60 = from)
+[[midasm_hook]]
+address = 0x82874cd8
+name = "SesDbg_UdpPacket"
+registers = ["r31", "r3", "r1"]
+
+# Reassembly drain: confirms a reliable datagram was accepted. The r3+0x3c
+# push callback is optional and zero in this title's usual pull-receive path.
+[[midasm_hook]]
+address = 0x82874448
+name = "SesDbg_CommUdpProcess"
+registers = ["r3", "r4"]
+
+# CommUDP virtual pull-receive method (vtable +0x34). This must run after a
+# reassembled OSDK packet for the game to pass it to its OSDK dispatcher.
+[[midasm_hook]]
+address = 0x82875cc8
+name = "SesDbg_CommUdpRecv"
+registers = ["r3", "r4", "r5", "r6"]
+
+# Same pull-receive method after its return byte count has been loaded into r3.
+# This identifies the real post-receive game caller and payload.
+[[midasm_hook]]
+address = 0x82875d44
+name = "SesDbg_CommUdpRecvResult"
+registers = ["r3", "r30", "r1"]
+
+# Completed CommUDP internal stream record, immediately before the owning
+# CommUDP object's vtable callback. 0x82876878 is the bctrl itself; 0x8287687c
+# is already after it, where volatile r11 no longer reliably holds the callback.
+[[midasm_hook]]
+address = 0x82876878
+name = "SesDbg_CommUdpMessageReady"
+registers = ["r3", "r11", "r29", "r1"]
+
+# Every completed stream record, after lbz r11,6(r29) but before the tag
+# comparison. It remains active when tag is 0 (normal timer/keepalive frame),
+# unlike the callback probe above which runs only for tag 2.
+[[midasm_hook]]
+address = 0x82876860
+name = "SesDbg_CommUdpRecord"
+registers = ["r31", "r29", "r11", "r1"]
+
+# Stream worker entry after `lwz r31,76(r3)`. It exposes the stream's real
+# app callback fields even when the post-buffer notify guard does not pass.
+[[midasm_hook]]
+address = 0x82876b30
+name = "SesDbg_CommUdpStreamWorker"
+registers = ["r3", "r31", "r1"]
+
+# Normal stream-record delivery: sub_82876B18 calls the owning application's
+# receiver after the stream worker buffered tag-1 lobby frames. This is the
+# real post-buffer handoff, not CommUDP's tag-2 transport callback above.
+[[midasm_hook]]
+address = 0x82876b8c
+name = "SesDbg_CommUdpStreamNotify"
+registers = ["r3", "r11", "r31", "r1"]
+
+# Reassembled CommUDP payload about to enter the ref's application callback.
+# Read-only, bounded [netdbg] logging when NOBK_DIAG=1; both delivery paths.
+[[midasm_hook]]
+address = 0x82874648
+name = "NetDbg_CommUdpDeliverA"
+registers = ["r30", "r11", "r4", "r5", "r6"]
+
+[[midasm_hook]]
+address = 0x82874734
+name = "NetDbg_CommUdpDeliverB"
+registers = ["r30", "r11", "r4", "r5", "r6"]
+
+# control packet (INIT/CONN/POKE/DISC) accepted for a ref (r3 = ref, r4 = packet, r5 = from)
+[[midasm_hook]]
+address = 0x82874308
+name = "SesDbg_UdpControl"
+registers = ["r3", "r4", "r5"]
+
+# ConnApi per-client link check (r3 = link status, r30 = manager, r31 = client)
+[[midasm_hook]]
+address = 0x82877b14
+name = "SesDbg_LinkCheck"
+registers = ["r3", "r30", "r31"]
+
+# CommUDP disconnect: state set to 5 (r31 = ref)
+[[midasm_hook]]
+address = 0x828742dc
+name = "SesDbg_UdpClose"
+registers = ["r31", "r1"]
+
+# CommUDP control: INIT with a foreign connident closes the link
+[[midasm_hook]]
+address = 0x82874338
+name = "SesDbg_UdpBadInit"
+registers = ["r3", "r4"]
+
+# CommUDP "nothing received for 120 s" check: its receive stamp stays 0 here,
+# so it fired on any 2 s send gap (a frame hitch) -- neutralised in the hook
+[[midasm_hook]]
+address = 0x82875058
+name = "Online_CommUdpIdleCheck"
+registers = ["r11", "r27", "r31"]
+
+# Match events: every gameplay message (goal, card, substitution, kick-off...)
+# goes through PostMessage (0x826072f0). Hooked after the game stamped the
+# match clock into the payload: r26 = message type, r30 = payload, r28 = size.
+[[midasm_hook]]
+address = 0x82607360
+name = "Match_PostMessage"
+registers = ["r26", "r30", "r28", "r31"]
+
+# CommUDP socket callback idle period 100 ms -> 5 ms (NOBK_COMMUDP_IDLE overrides).
+# Fixes the online stutter: received packets were only read every 100 ms.
+[[midasm_hook]]
+address = 0x82875828
+name = "Online_CommUdpIdleRate"
+registers = ["r5"]
+
+[[midasm_hook]]
+address = 0x82876188
+name = "Online_CommUdpIdleRate2"
+registers = ["r5"]
+
+# Online half length 5 -> 4 minutes (NOBK_ONLINE_HALF overrides, 0 = off):
+# right before the clock reads its half length (lfs f13, 0x80(r31))
+[[midasm_hook]]
+address = 0x826775a8
+name = "Online_HalfLength"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x82678b34
+name = "Online_HalfLength2"
+registers = ["r31"]
+
+[[midasm_hook]]
+address = 0x82676434
+name = "Online_HalfLength3"
+registers = ["r3"]
+
+# --- Team play (10v10): host side of the OSDK peer connection ("[tp]" lines) ---
+# PeerConnectionManagerConcrete::HandleConnApiGameCallback, after its debug print
+[[midasm_hook]]
+address = 0x82d03624
+name = "Tp_ConnApiGameCb"
+registers = ["r29", "r31"]
+
+# ... GetPeerConnection(name) result
+[[midasm_hook]]
+address = 0x82d036a4
+name = "Tp_ConnApiGameCbExisting"
+registers = ["r3", "r29"]
+
+# ... ConnApiStatus('gsmd') result
+[[midasm_hook]]
+address = 0x82d036dc
+name = "Tp_ConnApiGameCbGsmd"
+registers = ["r3"]
+
+# GetGameUserFromClientList 0x82c8da88: list source, each name compare, result
+[[midasm_hook]]
+address = 0x82c8dacc
+name = "Tp_GameUserSource"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82c8db9c
+name = "Tp_GameUserCompare"
+registers = ["r3", "r24", "r30", "r28"]
+
+[[midasm_hook]]
+address = 0x82c8dbe8
+name = "Tp_GameUserResult"
+registers = ["r26", "r25", "r24"]
+
+# GameSetupConcrete methods
+[[midasm_hook]]
+address = 0x82cff0b0
+name = "Tp_PeerConnectGameSuccess"
+registers = ["r3", "r4"]
+
+[[midasm_hook]]
+address = 0x82ce5418
+name = "Tp_AddStreamedPeer"
+registers = ["r3", "r4"]
+
+[[midasm_hook]]
+address = 0x82cff518
+name = "Tp_UpdateStreamedList"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82d0d6d8
+name = "Tp_AllPeersConnected"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82c85088
+name = "Tp_SessionStarted"
+registers = ["r3", "r4"]
+
+[[midasm_hook]]
+address = 0x82cff440
+name = "Tp_SessionJoined"
+registers = ["r3", "r4"]
+
+# PeerConnectionManager game-session state listener (old r4 -> new r5)
+[[midasm_hook]]
+address = 0x82d11b40
+name = "Tp_SessionState"
+registers = ["r3", "r4", "r5"]
+
+# ... RegisterConnection of the new PeerConnection, then the listener loop
+[[midasm_hook]]
+address = 0x82d037b4
+name = "Tp_RegisterPeer"
+registers = ["r29", "r30"]
+
+[[midasm_hook]]
+address = 0x82d03800
+name = "Tp_NotifyPeerListeners"
+registers = ["r31", "r29"]
+
+# GameSetupConcrete::Shutdown / Startup (second prologue instruction: r12 = caller)
+[[midasm_hook]]
+address = 0x82cafec4
+name = "Tp_SetupShutdown"
+registers = ["r3", "r12", "r1"]
+
+[[midasm_hook]]
+address = 0x82cff79c
+name = "Tp_SetupStartup"
+registers = ["r3", "r12", "r1"]
+
+[[midasm_hook]]
+address = 0x82c8508c
+name = "Tp_SessionStartedFrom"
+registers = ["r3", "r12", "r1"]
+
+# Career crash guard: allocator unsorted-list fd check (after lwz r10,8(r4) at 0x8235d9a4)
+[[midasm_hook]]
+address = 0x8235d9a8
+name = "Heap_UnsortedFdGuard"
+registers = ["r4", "r10", "r29", "r30"]
+
+# UpdateStreamedPeerConnectionList loop items + RemoveStreamedPeerConnection (3rd-player crash)
+[[midasm_hook]]
+address = 0x82cff630
+name = "Tp_UpdStreamedItem"
+registers = ["r3", "r31", "r25"]
+
+[[midasm_hook]]
+address = 0x82cff6bc
+name = "Tp_UpdPeerItem"
+registers = ["r29", "r27", "r24"]
+
+[[midasm_hook]]
+address = 0x82cb010c
+name = "Tp_RemoveStreamedPeer"
+registers = ["r3", "r4", "r12"]
+
+# PeerConnectAllPeersConnected internals (3rd-player "call to 0x4")
+[[midasm_hook]]
+address = 0x82d0d6dc
+name = "Tp_AllPeersFrom"
+registers = ["r12", "r1"]
+
+[[midasm_hook]]
+address = 0x82d0d730
+name = "Tp_AllPeersListener"
+registers = ["r3", "r30"]
+
+[[midasm_hook]]
+address = 0x82d0d764
+name = "Tp_AllPeersState"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82d0d7cc
+name = "Tp_AllPeersCount"
+registers = ["r3"]
+
+[[midasm_hook]]
+address = 0x82d0d7f0
+name = "Tp_AllPeersListener2"
+registers = ["r3", "r30"]
+
+[[midasm_hook]]
+address = 0x82d0d814
+name = "Tp_AllPeersTail"
+registers = ["r3"]
+
+# OSDK heap double-free detector (3rd team play player crash)
+# operator new: block handed out (r3 = block, before "stw r31,0(r3)")
+[[midasm_hook]]
+address = 0x82c57018
+name = "Tp_OsdkNewResult"
+registers = ["r3"]
+
+# OSDK delete: r3 = user pointer (non-null here)
+[[midasm_hook]]
+address = 0x82c57048
+name = "Tp_OsdkDelete"
+registers = ["r3", "r1"]
+
+# Refcount trace of watched GameUser objects (3rd-player crash)
+[[midasm_hook]]
+address = 0x82ca5b44
+name = "Tp_RefAdd"
+registers = ["r4", "r1"]
+
+[[midasm_hook]]
+address = 0x82c80c38
+name = "Tp_RefRelease"
+registers = ["r7", "r1"]
+
+[[midasm_hook]]
+address = 0x82c80c74
+name = "Tp_RefDestroy"
+registers = ["r7", "r1"]
+jump_address_on_true = 0x82c80c8c
+
+# second AddRef path: smart-pointer assign 0x82C80CA0 (r4 = new object)
+[[midasm_hook]]
+address = 0x82c80cc0
+name = "Tp_RefAdd2"
+registers = ["r4", "r1"]
+
+# Lobby per-user list pool: 16-byte operator new requests and entry frees
+[[midasm_hook]]
+address = 0x82c56ffc
+name = "Tp_PoolNew"
+registers = ["r31", "r4", "r1"]
+
+[[midasm_hook]]
+address = 0x82ce5a00
+name = "Tp_PoolEntryFree"
+registers = ["r3", "r4"]
+
+# FIX (team play 3+ players): OSDK max players 2 -> 24 where read as a capacity
+[[midasm_hook]]
+address = 0x82ce4628
+name = "Tp_MaxPlayersA"
+registers = ["r4"]
+
+[[midasm_hook]]
+address = 0x82ce4660
+name = "Tp_MaxPlayersB"
+registers = ["r5"]
+
+[[midasm_hook]]
+address = 0x82ce4ec8
+name = "Tp_MaxPlayersC"
+registers = ["r4"]
+
+[[midasm_hook]]
+address = 0x82cbe0ac
+name = "Tp_MaxPlayersD"
+registers = ["r29"]
+
+[[midasm_hook]]
+address = 0x82cbe884
+name = "Tp_MaxPlayersE"
+registers = ["r27"]
+
+[[midasm_hook]]
+address = 0x82cef044
+name = "Tp_MaxPlayersF"
+registers = ["r28"]
+
+[[midasm_hook]]
+address = 0x82d11804
+name = "Tp_MaxPlayersG"
+registers = ["r28"]
+
+[[midasm_hook]]
+address = 0x82c79808
+name = "Online_MatchupTimeout"
+registers = ["r30"]
+
+[[midasm_hook]]
+address = 0x82879578
+name = "Tp_VoipMax"
+registers = ["r3"]
+
+# Front-end script natives: registration (name -> native object) and the VM's call site.
+# Used for the main menu "Quit to Desktop" item (NOBK_UI_TRACE / NOBK_QUIT_NATIVE).
+[[midasm_hook]]
+address = 0x82d3d280
+name = "Ui_RegisterNative"
+registers = ["r4", "r5"]
+
+[[midasm_hook]]
+address = 0x82d28394
+name = "Ui_CallNative"
+registers = ["r5"]
+
+[[midasm_hook]]
+address = 0x831c9dfc
+name = "Ui_NotifyMenu"
+registers = ["r3", "r31"]
+
+[[midasm_hook]]
+address = 0x831c9e8c
+name = "Ui_NotifySelection"
+registers = ["r3", "r29", "r30", "r31"]
+
+[[midasm_hook]]
+address = 0x831c9d08
+name = "Ui_NotifyScreen"
+registers = ["r3", "r31"]
+
+# Lobby leave crash (19 Oct, 5-player Be A Pro): sub_82882AF8 removes a player index from
+# two 32-slot object tables (mgr+2408, +2536) and reads slot->+256. A slot can hold a bogus
+# value (seen 0x101 -> read of 0x201) when several peers drop at once. Guard: before
+# "cmplwi cr6,r7,0", a non-pointer r7 becomes 0 so the slot is skipped.
+[[midasm_hook]]
+address = 0x82882b40
+name = "Tp_PeerSlotGuard"
+registers = ["r7"]
+
+# Team play routing (19 Oct, 5-7 player Be A Pro stuck in the loading arena): CommUDP sends
+# every packet to the address ConnApi gave it, which is the server's own address ("my
+# partner"), so the relay copied the host's stream for client A to ALL clients and every
+# client's acks to everyone; with 3+ players the reliable streams got foreign seq/acks.
+# sub_82874148 (CommUDP raw send: r31 = ref, r7 = destination, DirtySock sockaddr) right
+# before SocketSendto: once the ref is bound to a peer (ref+0x8c, a 10.x virtual address),
+# send to that peer, so the relay forwards it to that one player only.
+[[midasm_hook]]
+address = 0x8287419c
+name = "Tp_CommUdpSendToPeer"
+registers = ["r31", "r7"]
+
+# ...but CommUDP already sends to the peer's 10.x address (ref+0x8c); the server address comes
+# from DirtySock ProtoTunnel: its send callback (sub_82881690, 'sdcb') maps the 10.x address to
+# a tunnel (virtual address at tunnel+36) and the flush sub_828812E8 sends the batch to the
+# tunnel's remote address (tunnel+4 / +8 = the server). Before that SocketSendto (0x82881568:
+# r31 = tunnel, r7 = sockaddr on the stack) the address becomes the tunnel's 10.x address.
+[[midasm_hook]]
+address = 0x82881568
+name = "Tp_TunnelSendToPeer"
+registers = ["r31", "r7"]
+
+# Diagnostics (team play routing): every guest sendto, destination + callers.
+[[midasm_hook]]
+address = 0x82fb5e40
+name = "Tp_SendtoTrace"
+registers = ["r3", "r5", "r7", "r1"]
+
+# Team play routing, the real spot (19 Oct, 1.2.4 diagnostics): CommUDP sends to the peer's
+# 10.x address, but DirtySock's SocketSendto converts it in sub_8287E060: a 32-entry address
+# map at global+648 (108 bytes each) gives a "real" address at entry+96, which is the server's
+# own address for every player, so the relay could not tell the receivers apart and copied
+# every packet to all players (3+ players stuck in the loading arena). At "mr r27,r11"
+# (r27 = address being sent to, r11 = mapped address) a 10.x address is kept as it is, so
+# the relay forwards each packet to exactly that player. NOBK_TP_DIRECT=0 turns it off.
+[[midasm_hook]]
+address = 0x8287e110
+name = "Tp_KeepVirtualAddr"
+registers = ["r27", "r11"]
+
+# ...the 1.2.5 hook above never fired: the address map is empty. The conversion comes from
+# the ROUTE table right after it (32 entries of 20 bytes, net/mask/gateway/ports): a route
+# for the 10.x players sends every packet to the gateway = the server. A matched route lands
+# on loc_8287E16C; for a 10.x destination we jump to the end (0x8287E1E4, no rewrite), so the
+# packet keeps the player's address and the relay forwards it to that player only.
+[[midasm_hook]]
+address = 0x8287e16c
+name = "Tp_SkipRouteForPlayers"
+registers = ["r27", "r28", "r29"]
+jump_address_on_true = 0x8287e1e4

@@ -1,0 +1,134 @@
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index c42e2aa..4abd87d 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -13,7 +13,9 @@
+ #include <cstdarg>
+ #include <cstring>
+ #include <sstream>
++#include <string>
+ #include <utility>
++#include <vector>
+ 
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+@@ -38,6 +40,9 @@ REXCVAR_DEFINE_BOOL(gpu_capture_next_frame, false, "GPU/Debug",
+                     "then reset. Needs the game launched from RenderDoc.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(gpu_log_swap_resolves, true, "GPU/Debug",
++                    "Log swaps whose front buffer was not written by a resolve in that frame");
++
+ namespace {
+ // RenderDoc's own capture key (F12) captures one present of the host
+ // swapchain, which only contains the presenter's work, not the guest
+@@ -66,6 +71,70 @@ void RenderDocCaptureOnSwap(ID3D12Device* device) {
+     REXGPU_INFO("RenderDoc: capturing the next guest frame");
+   }
+ }
++
++// Front buffer diagnostics: remembers every resolve destination between two
++// swaps and reports swaps whose source was not written by any resolve.
++struct FrameResolve {
++  uint32_t address, length;
++  bool ok;
++};
++std::vector<FrameResolve> g_frame_resolves;
++uint32_t g_frame_resolve_attempts = 0;
++uint64_t g_swap_index = 0;
++uint64_t g_missing_streak = 0;
++uint64_t g_missing_total = 0;
++
++void NoteResolve(bool ok, uint32_t address, uint32_t length) {
++  ++g_frame_resolve_attempts;
++  if (g_frame_resolves.size() < 64) {
++    g_frame_resolves.push_back({address, length, ok});
++  }
++}
++
++void CheckSwapSource(uint32_t swap_base, uint32_t swap_length, uint32_t frontbuffer_ptr,
++                     uint32_t width, uint32_t height) {
++  ++g_swap_index;
++  if (!REXCVAR_GET(gpu_log_swap_resolves)) {
++    g_frame_resolves.clear();
++    g_frame_resolve_attempts = 0;
++    return;
++  }
++  bool written = false;
++  for (const FrameResolve& r : g_frame_resolves) {
++    if (r.ok && r.length && r.address < swap_base + swap_length &&
++        swap_base < r.address + r.length) {
++      written = true;
++      break;
++    }
++  }
++  if (g_swap_index <= 3) {
++    REXGPU_INFO("SwapDiag: swap #{} source {:08X} ({}x{}, VdSwap ptr {:08X}), resolves this frame {}, "
++                "front buffer written: {}",
++                g_swap_index, swap_base, width, height, frontbuffer_ptr, g_frame_resolve_attempts,
++                written ? "yes" : "NO");
++  }
++  if (!written) {
++    ++g_missing_streak;
++    ++g_missing_total;
++    if (g_missing_total <= 20 || g_missing_total % 300 == 0) {
++      std::string list;
++      for (size_t i = 0; i < g_frame_resolves.size() && i < 12; ++i) {
++        const FrameResolve& r = g_frame_resolves[i];
++        list += fmt::format(" {:08X}+{:X}{}", r.address, r.length, r.ok ? "" : "(failed)");
++      }
++      REXGPU_WARN("SwapDiag: swap #{} shows {:08X} ({}x{}, VdSwap ptr {:08X}) but no resolve wrote it "
++                  "this frame (streak {}, total {}). Resolves:{}",
++                  g_swap_index, swap_base, width, height, frontbuffer_ptr, g_missing_streak,
++                  g_missing_total, list.empty() ? " none" : list);
++    }
++  } else if (g_missing_streak) {
++    REXGPU_WARN("SwapDiag: swap #{} front buffer {:08X} written again after {} stale frames",
++                g_swap_index, swap_base, g_missing_streak);
++    g_missing_streak = 0;
++  }
++  g_frame_resolves.clear();
++  g_frame_resolve_attempts = 0;
++}
+ }  // namespace
+ 
+ REXCVAR_DEFINE_BOOL(d3d12_bindless, true, "GPU/D3D12", "Use bindless resources where available")
+@@ -1947,6 +2016,14 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+     return;
+   }
+ 
++  {
++    xenos::xe_gpu_texture_fetch_t swap_fetch = register_file_->GetTextureFetch(0);
++    uint32_t swap_w = frontbuffer_width ? frontbuffer_width : 1280;
++    uint32_t swap_h = frontbuffer_height ? frontbuffer_height : 720;
++    CheckSwapSource(uint32_t(swap_fetch.base_address) << 12, swap_w * swap_h * 4, frontbuffer_ptr,
++                    swap_w, swap_h);
++  }
++
+   // Obtain the actual swap source texture size (resolution-scaled if it's a
+   // resolve destination, or not otherwise).
+   D3D12_SHADER_RESOURCE_VIEW_DESC swap_texture_srv_desc;
+@@ -2918,8 +2995,10 @@ bool D3D12CommandProcessor::IssueCopy() {
+   ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+     uint32_t written_address, written_length;
+-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+-                                         written_address, written_length);
++    bool ok = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
++                                            written_address, written_length);
++    NoteResolve(ok, written_address, written_length);
++    return ok;
+   }
+   return IssueCopy_ReadbackResolvePath();
+ }
+@@ -2928,8 +3007,10 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+   uint32_t written_address, written_length;
+   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
+                                      written_length)) {
++    NoteResolve(false, 0, 0);
+     return false;
+   }
++  NoteResolve(true, written_address, written_length);
+ 
+   if (!written_length) {
+     return true;

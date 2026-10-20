@@ -1,0 +1,14 @@
+--- a/src/kernel/xam/apps/xlivebase_app.cpp
++++ b/src/kernel/xam/apps/xlivebase_app.cpp
+@@ -71,7 +71,10 @@
+       const uint16_t port =
+           static_cast<uint16_t>(rex::cvar::Query<uint32_t>("online_server_port"));
+       bool wrote = false;
+-      if (out_guest >= 0x1000u && out_guest < 0xC0000000u) {
++      // NASCAR 09 passes an XONLINE_SERVICE_INFO in the 0xE0000000+ (physical) range
++      // (0xFF7FA1A4); the old "< 0xC0000000" check left it unwritten (wrote=false) and
++      // the game never opened its lobby connection.
++      if (out_guest >= 0x1000u) {
+         if (auto out = memory_->TranslateVirtual(out_guest)) {
+           const uint8_t ipbytes[4] = {uint8_t(a), uint8_t(b), uint8_t(c), uint8_t(d)};
+           memory::store_and_swap<uint32_t>(out + 0, service_id);

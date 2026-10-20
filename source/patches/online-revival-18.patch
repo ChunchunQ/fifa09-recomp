@@ -1,0 +1,46 @@
+From d0d0bb62bda8322769a724969418d9289e871e11 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 18:15:40 +0300
+Subject: [PATCH] local: same-PC check never caches a loopback local address
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/xam_net.cpp | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 3f94708..f1aecfc 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -177,7 +177,10 @@ static int OwnPortOffset() { return REXCVAR_GET(online_port_offset); }
+ static int PeerPortOffset() { return REXCVAR_GET(online_peer_port_offset); }
+ 
+ static uint32_t CachedLocalIPv4NBO() {
+-  static uint32_t ip = PrimaryLocalIPv4NBO();
++  // Don't keep a loopback answer: an early call (before Winsock is up) falls
++  // back to 127.0.0.1, which made the same-PC peer checks never match.
++  static uint32_t ip = 0;
++  if (ip == 0 || ip == htonl(INADDR_LOOPBACK)) ip = PrimaryLocalIPv4NBO();
+   return ip;
+ }
+ 
+@@ -974,7 +977,15 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
+       // [online] A peer on this same PC (second test instance): use loopback,
+       // the address the lobby hands out for it, so every part of the game
+       // (game link, tunnel/voice) sees the peer at one consistent address.
++      const uint32_t before = peer;
+       if (peer == CachedLocalIPv4NBO()) peer = htonl(INADDR_LOOPBACK);
++      if (PacketLogEnabled()) {
++        const uint32_t local = CachedLocalIPv4NBO();
++        const uint8_t* b = reinterpret_cast<const uint8_t*>(&before);
++        const uint8_t* l = reinterpret_cast<const uint8_t*>(&local);
++        REXKRNL_INFO("[online] XNetXnAddrToInAddr: xnaddr {}.{}.{}.{} local {}.{}.{}.{}", b[0],
++                     b[1], b[2], b[3], l[0], l[1], l[2], l[3]);
++      }
+       if (in_addr) std::memcpy(in_addr.host_address(), &peer, 4);
+       const uint8_t* pb = reinterpret_cast<const uint8_t*>(&peer);
+       REXKRNL_INFO("[online] XNetXnAddrToInAddr -> peer {}.{}.{}.{}", pb[0], pb[1], pb[2], pb[3]);
+-- 
+2.43.0
+

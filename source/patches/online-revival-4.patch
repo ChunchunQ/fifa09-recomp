@@ -1,0 +1,83 @@
+From f54435e5acd8bb9f0c25c0bc306ea248387521c9 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 14:17:52 +0300
+Subject: [PATCH] local: trace_imports
+
+---
+ include/rex/hook.h         | 28 +++++++++++++++++++++++++---
+ src/kernel/xam/xam_net.cpp |  4 ++++
+ 2 files changed, 29 insertions(+), 3 deletions(-)
+
+diff --git a/include/rex/hook.h b/include/rex/hook.h
+index 4ce4f9b..d1c2b25 100644
+--- a/include/rex/hook.h
++++ b/include/rex/hook.h
+@@ -11,12 +11,14 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <cstring>
+ #include <tuple>
+ #include <type_traits>
+ 
+ #include <fmt/format.h>
+ 
++#include <rex/cvar.h>
+ #include <rex/logging.h>
+ #include <rex/ppc/context.h>
+ #include <rex/ppc/function.h>
+@@ -39,12 +41,32 @@
+     rex::ppc::HostToGuestFunction<function>(ctx, base);          \
+   }
+ #else
+-#define REX_HOOK(subroutine, function)                  \
+-  extern "C" REX_FUNC(subroutine) {                     \
+-    rex::ppc::HostToGuestFunction<function>(ctx, base); \
++#define REX_HOOK(subroutine, function)                                         \
++  extern "C" REX_FUNC(subroutine) {                                            \
++    static std::atomic<uint32_t> rex_trace_count_{0};                          \
++    const bool rex_trace_ = rex::detail::TraceImportsEnabled() &&              \
++                            rex_trace_count_.fetch_add(1) < 4;                 \
++    const uint64_t rex_a_[4] = {ctx.r3.u64, ctx.r4.u64, ctx.r5.u64, ctx.r6.u64}; \
++    const uint32_t rex_lr_ = static_cast<uint32_t>(ctx.lr);                    \
++    rex::ppc::HostToGuestFunction<function>(ctx, base);                        \
++    if (rex_trace_) {                                                          \
++      REXKRNL_INFO("[import] {}({:08X}, {:08X}, {:08X}, {:08X}) -> {:08X} from {:08X}", \
++                   #subroutine, uint32_t(rex_a_[0]), uint32_t(rex_a_[1]),      \
++                   uint32_t(rex_a_[2]), uint32_t(rex_a_[3]),                   \
++                   uint32_t(ctx.r3.u64), rex_lr_);                             \
++    }                                                                          \
+   }
+ #endif
+ 
++namespace rex::detail {
++// [online] Debugging aid: with trace_imports=true the first 4 calls of every
++// kernel/XAM import are logged with arguments, result and guest caller.
++inline bool TraceImportsEnabled() {
++  static const bool enabled = rex::cvar::Query<bool>("trace_imports");
++  return enabled;
++}
++}  // namespace rex::detail
++
+ // Define a raw hook with direct ctx/base access.
+ #define REX_HOOK_RAW(name) extern "C" REX_FUNC(name)
+ 
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index a854f8d..421065d 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -58,6 +58,10 @@ REXCVAR_DEFINE_STRING(online_disable, "", "Net",
+                       "Debugging: comma list of online parts to keep offline "
+                       "(xnaddr, link, qos, redirect, signin, priv)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(trace_imports, false, "Net",
++                    "Debugging: log the first calls of every kernel/XAM import "
++                    "(arguments, result, guest caller)")
++    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+ REXCVAR_DEFINE_BOOL(net_packet_log, false, "Net",
+                     "Log every socket call, DNS lookup and XLIVEBASE message the game "
+                     "makes (destination, length, first 16 bytes)")
+-- 
+2.43.0
+

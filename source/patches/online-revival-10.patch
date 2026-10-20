@@ -1,0 +1,36 @@
+From 78245e591193bf7530e20a8533b3ec51b7b1235b Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 15:24:34 +0300
+Subject: [PATCH] local: XNetXnAddrToInAddr peer addresses
+
+---
+ src/kernel/xam/xam_net.cpp | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index fda6097..455af0a 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -644,6 +644,19 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
+   // address to our own Blaze server IP so the game connects to US, not EA. The
+   // original stub returned 1 = failure, which is what made the EA client give up
+   // with "EA server is not available" before ever opening a socket.
++  // [online] Peer-to-peer: another player's XNADDR carries that player's
++  // address (filled by their XNetGetTitleXnAddr), so connect there directly.
++  if (OnlineFeature("redirect") && xn_addr) {
++    uint32_t peer = 0;
++    std::memcpy(&peer, &xn_addr->inaOnline, 4);
++    if (!peer) std::memcpy(&peer, &xn_addr->ina, 4);
++    if (peer) {
++      if (in_addr) std::memcpy(in_addr.host_address(), &peer, 4);
++      const uint8_t* pb = reinterpret_cast<const uint8_t*>(&peer);
++      REXKRNL_INFO("[online] XNetXnAddrToInAddr -> peer {}.{}.{}.{}", pb[0], pb[1], pb[2], pb[3]);
++      return 0;
++    }
++  }
+   if (OnlineFeature("redirect")) {
+     const uint32_t redirect = BlazeRedirectNBO();
+     if (in_addr) {
+-- 
+2.43.0
+

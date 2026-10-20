@@ -1,0 +1,180 @@
+From 5c84c43b2d508caadf50ee6436c7d35254abc719 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 17:44:48 +0300
+Subject: [PATCH] local: poll pending UDP receives on the waiting game thread
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/xam_net.cpp | 119 ++++++++++++++++++++++++++-----------
+ 1 file changed, 84 insertions(+), 35 deletions(-)
+
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index d3997ad..5922222 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -568,6 +568,43 @@ static void CompleteOverlapped(uint32_t overlapped_ptr, uint32_t status, uint32_
+   }
+ }
+ 
++static std::mutex g_recv_mutex;
++static std::vector<PendingRecv> g_pending_recvs;
++
++static bool HavePendingRecvs() {
++  std::lock_guard<std::mutex> lock(g_recv_mutex);
++  return !g_pending_recvs.empty();
++}
++
++// Completes every pending overlapped receive that has data (or failed).
++static void PollPendingRecvs() {
++  std::vector<PendingRecv> list;
++  {
++    std::lock_guard<std::mutex> lock(g_recv_mutex);
++    list = g_pending_recvs;
++  }
++  for (auto& r : list) {
++    int e = 0;
++    int got = RecvIntoGuest(r, &e);
++    if (got < 0 && WouldBlock(e)) continue;
++    {
++      std::lock_guard<std::mutex> lock(g_recv_mutex);
++      for (auto it = g_pending_recvs.begin(); it != g_pending_recvs.end();) {
++        it = (it->overlapped_ptr == r.overlapped_ptr) ? g_pending_recvs.erase(it) : it + 1;
++      }
++    }
++    if (got >= 0) {
++      if (r.bytes_ptr) {
++        memory::store_and_swap<uint32_t>(REX_KERNEL_MEMORY()->TranslateVirtual<uint8_t*>(r.bytes_ptr),
++                                         uint32_t(got));
++      }
++      CompleteOverlapped(r.overlapped_ptr, 0, uint32_t(got));
++    } else {
++      CompleteOverlapped(r.overlapped_ptr, uint32_t(e), 0);
++    }
++  }
++}
++
+ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_ptr,
+                              u32 buffer_count, mapped_u32 num_bytes_recv, mapped_u32 flags_ptr,
+                              ppc_ptr_t<XSOCKADDR_IN> from_addr, mapped_u32 fromlen_ptr,
+@@ -603,37 +640,19 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
+     return -1;
+   }
+ 
+-  // Nothing yet: complete asynchronously.
++  // Nothing yet: complete it later. The pending receive is polled (on the
++  // game's own thread) from WSAWaitForMultipleEvents/WSAGetOverlappedResult,
++  // which is where EA's socket thread waits for it.
+   auto* ov = REX_KERNEL_MEMORY()->TranslateVirtual<XWSAOVERLAPPED*>(r.overlapped_ptr);
+   ov->internal_high = 0;
+   ov->internal = kStatusPending;
+-  std::thread([r]() {
+-    for (;;) {
+-      fd_set rf;
+-      FD_ZERO(&rf);
+-#if REX_PLATFORM_WIN32
+-      FD_SET(static_cast<SOCKET>(r.native), &rf);
+-      int sel = ::select(0, &rf, nullptr, nullptr, nullptr);
+-#else
+-      FD_SET(static_cast<int>(r.native), &rf);
+-      int sel = ::select(static_cast<int>(r.native) + 1, &rf, nullptr, nullptr, nullptr);
+-#endif
+-      if (sel < 0) {
+-        CompleteOverlapped(r.overlapped_ptr, 995 /* WSA_OPERATION_ABORTED */, 0);
+-        return;
+-      }
+-      int e = 0;
+-      int got = RecvIntoGuest(r, &e);
+-      if (got >= 0) {
+-        CompleteOverlapped(r.overlapped_ptr, 0, uint32_t(got));
+-        return;
+-      }
+-      if (!WouldBlock(e)) {
+-        CompleteOverlapped(r.overlapped_ptr, uint32_t(e), 0);
+-        return;
+-      }
++  {
++    std::lock_guard<std::mutex> lock(g_recv_mutex);
++    for (auto it = g_pending_recvs.begin(); it != g_pending_recvs.end();) {
++      it = (it->overlapped_ptr == r.overlapped_ptr) ? g_pending_recvs.erase(it) : it + 1;
+     }
+-  }).detach();
++    g_pending_recvs.push_back(r);
++  }
+   XThread::SetLastError(kWsaIoPending);
+   return -1;
+ }
+@@ -646,11 +665,12 @@ u32 NetDll_WSAGetOverlappedResult_entry(u32 caller, u32 socket,
+     XThread::SetLastError(87);
+     return 0;
+   }
++  PollPendingRecvs();
+   uint32_t status = overlapped->internal;
+   if (status == kStatusPending && wait) {
+-    // Rare: block until the receive thread completes it.
+     for (int i = 0; i < 5000 && overlapped->internal == kStatusPending; ++i) {
+       std::this_thread::sleep_for(std::chrono::milliseconds(1));
++      PollPendingRecvs();
+     }
+     status = overlapped->internal;
+   }
+@@ -714,20 +734,49 @@ u32 NetDll_WSAWaitForMultipleEvents_entry(u32 num_events, mapped_u32 events, u32
+     return ~0u;
+   }
+ 
+-  uint64_t timeout_wait = (uint64_t)timeout;
+-
++  // [online] While overlapped UDP receives are pending, wait in short slices
++  // and poll the sockets in between, completing receives (and setting their
++  // events) on this thread. Returns WSA_WAIT_EVENT_0 + index or
++  // WSA_WAIT_TIMEOUT (0x102) like the real call.
++  const bool infinite = timeout == 0xFFFFFFFFu;
++  auto start = std::chrono::steady_clock::now();
+   X_STATUS result = 0;
+-  do {
+-    result = xboxkrnl::xeNtWaitForMultipleObjectsEx(num_events, events, wait_all, 1, alertable,
+-                                                    timeout != -1 ? &timeout_wait : nullptr);
+-  } while (result == X_STATUS_ALERTED);
++  for (;;) {
++    bool polling = HavePendingRecvs();
++    if (polling) PollPendingRecvs();
++    uint64_t slice;
++    uint64_t* slice_ptr = nullptr;
++    if (polling || !infinite) {
++      int64_t ms = polling ? 2 : int64_t(timeout);
++      if (!infinite) {
++        int64_t left = int64_t(timeout) -
++                       std::chrono::duration_cast<std::chrono::milliseconds>(
++                           std::chrono::steady_clock::now() - start)
++                           .count();
++        if (left < 0) left = 0;
++        if (left < ms) ms = left;
++      }
++      slice = uint64_t(-ms * 10000);  // NT relative timeout, 100 ns units
++      slice_ptr = &slice;
++    }
++    do {
++      result = xboxkrnl::xeNtWaitForMultipleObjectsEx(num_events, events, wait_all, 1, alertable,
++                                                      slice_ptr);
++    } while (result == X_STATUS_ALERTED);
++    if (result != X_STATUS_TIMEOUT) break;
++    if (!infinite && std::chrono::duration_cast<std::chrono::milliseconds>(
++                         std::chrono::steady_clock::now() - start)
++                             .count() >= int64_t(timeout)) {
++      return 0x102;  // WSA_WAIT_TIMEOUT
++    }
++  }
+ 
+   if (XFAILED(result)) {
+     uint32_t error = xboxkrnl::xeRtlNtStatusToDosError(result);
+     XThread::SetLastError(error);
+     return ~0u;
+   }
+-  return 0;
++  return result < 64 ? result : 0;
+ }
+ 
+ u32 NetDll_WSACreateEvent_entry() {
+-- 
+2.43.0
+

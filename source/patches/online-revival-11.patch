@@ -1,0 +1,47 @@
+From 1a527b487cdd870425086da714f0445f696df72e Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 15:56:39 +0300
+Subject: [PATCH] local: XStringVerify
+
+---
+ src/kernel/xam/apps/xlivebase_app.cpp | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/src/kernel/xam/apps/xlivebase_app.cpp b/src/kernel/xam/apps/xlivebase_app.cpp
+index f88fcce..fd50b75 100644
+--- a/src/kernel/xam/apps/xlivebase_app.cpp
++++ b/src/kernel/xam/apps/xlivebase_app.cpp
+@@ -94,6 +94,30 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message, uint32_t buffer_pt
+       }
+       return X_E_SUCCESS;
+     }
++    case 0x0005000C: {
++      // [online] XStringVerify (profanity check of game/room names). Every
++      // string is accepted. buffer_ptr -> XLIVEBASE_ASYNC_MESSAGE whose first
++      // word is the XLIVE_ASYNC_TASK (request at +0x18/+0x1C, results at
++      // +0x2C/+0x30). Request: title_id, flags, be16 locale_size, be16 count.
++      // Results: { be16 count; be32 results_ptr; } followed by count HRESULTs.
++      if (!buffer_ptr) return X_E_INVALIDARG;
++      const uint32_t task = memory::load_and_swap<uint32_t>(buffer);
++      if (!task) return X_E_INVALIDARG;
++      auto t = memory_->TranslateVirtual(task);
++      const uint32_t req = memory::load_and_swap<uint32_t>(t + 0x18);
++      const uint32_t res = memory::load_and_swap<uint32_t>(t + 0x2C);
++      const uint32_t res_size = memory::load_and_swap<uint32_t>(t + 0x30);
++      if (!req || !res || res_size < 6) return X_E_INVALIDARG;
++      uint16_t count = memory::load_and_swap<uint16_t>(memory_->TranslateVirtual(req + 10));
++      const uint32_t max_count = (res_size - 6) / 4;
++      if (count > max_count) count = static_cast<uint16_t>(max_count);
++      auto r = memory_->TranslateVirtual(res);
++      std::memset(r, 0, res_size);
++      memory::store_and_swap<uint16_t>(r + 0, count);
++      memory::store_and_swap<uint32_t>(r + 2, res + 6);
++      REXKRNL_INFO("[online] XStringVerify: {} string(s) accepted", count);
++      return X_E_SUCCESS;
++    }
+     case 0x00058020: {
+       // [online] XFriendsCreateEnumerator. buffer_length points to an argument
+       // list of 16-byte entries { be32 size; pad; be64 value_ptr }:
+-- 
+2.43.0
+

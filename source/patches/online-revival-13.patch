@@ -1,0 +1,115 @@
+From 15fbbc8a63a7382267a40ab97c620f92f026f4af Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 17:27:44 +0300
+Subject: [PATCH] local: XSessionCreate fills host session info and nonce
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/apps/xgi_app.cpp | 41 +++++++++++++++++++++++++++++++++
+ src/kernel/xam/xam_net.cpp      | 20 ++++++++++++++++
+ 2 files changed, 61 insertions(+)
+
+diff --git a/src/kernel/xam/apps/xgi_app.cpp b/src/kernel/xam/apps/xgi_app.cpp
+index 2b222da..282dffd 100644
+--- a/src/kernel/xam/apps/xgi_app.cpp
++++ b/src/kernel/xam/apps/xgi_app.cpp
+@@ -10,6 +10,9 @@
+  */
+ 
+ #include <rex/kernel/xam/apps/xgi_app.h>
++
++#include <chrono>
++#include <cstring>
+ #include <rex/logging.h>
+ #include <rex/thread.h>
+ 
+@@ -18,9 +21,26 @@ namespace kernel {
+ namespace xam {
+ using namespace rex::system;
+ using namespace rex::system::xam;
++void OnlineFillTitleXnAddr(uint8_t* out);  // xam_net.cpp
++
+ namespace apps {
+ using namespace rex::system;
+ 
++// [online] Random bytes for session ids, keys and nonces.
++static void OnlineRandomBytes(uint8_t* out, size_t n) {
++  static uint64_t state = 0;
++  if (!state) {
++    state = uint64_t(std::chrono::high_resolution_clock::now().time_since_epoch().count()) ^
++            0x9E3779B97F4A7C15ull;
++  }
++  for (size_t i = 0; i < n; ++i) {
++    state ^= state << 13;
++    state ^= state >> 7;
++    state ^= state << 17;
++    out[i] = uint8_t(state >> 24);
++  }
++}
++
+ XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
+ 
+ // http://mb.mirage.org/bugzilla/xliveless/main.c
+@@ -113,6 +133,27 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
+           "{:08X})",
+           session_ptr, flags, num_slots_public, num_slots_private, user_xuid, session_info_ptr,
+           nonce_ptr);
++      // [online] A host session (XSESSION_CREATE_HOST = 1) must hand back its
++      // XSESSION_INFO { XNKID sessionID[8]; XNADDR hostAddress[36];
++      // XNKEY keyExchangeKey[16] } and a nonce: the game publishes them to the
++      // lobby (gset SESS=/PLATPARAMS=) so the other player can join. Joiners
++      // pass the host's info in, so it is left untouched for them.
++      if ((flags & 1) && session_info_ptr) {
++        uint8_t* info = memory_->TranslateVirtual<uint8_t*>(session_info_ptr);
++        OnlineRandomBytes(info, 8);
++        info[0] = uint8_t((info[0] & 0x0F) | 0x80);  // online peer session id
++        OnlineFillTitleXnAddr(info + 8);
++        OnlineRandomBytes(info + 44, 16);
++      }
++      if (nonce_ptr) {
++        uint8_t* nonce = memory_->TranslateVirtual<uint8_t*>(nonce_ptr);
++        bool zero = true;
++        for (int i = 0; i < 8; ++i) zero = zero && nonce[i] == 0;
++        if (zero) OnlineRandomBytes(nonce, 8);
++      }
++      REXKRNL_INFO("[online] XSessionCreate flags={:08X} slots={}+{} -> {}", flags,
++                   num_slots_public, num_slots_private,
++                   (flags & 1) ? "host session info filled" : "join");
+       return X_E_SUCCESS;
+     }
+     case 0x000B0011: {
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index d18a89d..27411b3 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -606,6 +606,26 @@ u32 NetDll_XNetGetTitleXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+          XnAddrStatus::XNET_GET_XNADDR_ONLINE;
+ }
+ 
++// [online] Writes this console's title XNADDR (same values XNetGetTitleXnAddr
++// reports) into a 36-byte guest buffer. Used by XSessionCreate to fill the
++// session's host address.
++void OnlineFillTitleXnAddr(uint8_t* out) {
++  XNADDR a;
++  std::memset(&a, 0, sizeof(a));
++  const uint32_t local_ip = PrimaryLocalIPv4NBO();
++  uint32_t online_ip = local_ip;
++  const std::string online_ip_str = rex::cvar::Query<std::string>("online_public_ip");
++  if (!online_ip_str.empty()) {
++    const uint32_t parsed = inet_addr(online_ip_str.c_str());
++    if (parsed != INADDR_NONE) online_ip = parsed;
++  }
++  a.ina.s_addr = local_ip;
++  a.inaOnline.s_addr = online_ip;
++  a.wPortOnline = 34643;
++  std::memset(a.abEnet, 0xCC, 6);
++  std::memcpy(out, &a, sizeof(a));
++}
++
+ u32 NetDll_XNetGetDebugXnAddr_entry(u32 caller, ppc_ptr_t<XNADDR> addr_ptr) {
+   addr_ptr.Zero();
+ 
+-- 
+2.43.0
+

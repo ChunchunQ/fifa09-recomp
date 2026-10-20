@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Fifa09Launcher</RootNamespace>
+    <AssemblyName>FIFA09 Launcher</AssemblyName>
+    <Version>1.2.7</Version>
+
+    <!-- Single self-contained exe: players do not need .NET installed. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\flags\*.png" />
+    <!-- Launcher art, built into the exe. The files are local only (Launcher\.gitignore:
+         third-party photo, trademarked logo); without them the launcher shows a text logo. -->
+    <Resource Include="..\background.png" Link="Assets\art\background.png" Condition="Exists('..\background.png')" />
+    <Resource Include="..\background.jpg" Link="Assets\art\background.jpg" Condition="Exists('..\background.jpg')" />
+    <Resource Include="..\logo.png" Link="Assets\art\logo.png" Condition="Exists('..\logo.png')" />
+  </ItemGroup>
+
+</Project>

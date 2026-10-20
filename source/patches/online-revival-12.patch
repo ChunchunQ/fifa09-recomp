@@ -1,0 +1,105 @@
+From ec18200f6df7670195f15e635d01e8ef2b0b05a2 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 16:20:25 +0300
+Subject: [PATCH] local: XNetQosLookup + XNetLogonGetMachineID
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/xam_misc.cpp |  1 -
+ src/kernel/xam/xam_net.cpp  | 60 ++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/src/kernel/xam/xam_misc.cpp b/src/kernel/xam/xam_misc.cpp
+index fb8d525..cefc3f3 100644
+--- a/src/kernel/xam/xam_misc.cpp
++++ b/src/kernel/xam/xam_misc.cpp
+@@ -237,7 +237,6 @@ REX_EXPORT_STUB(__imp__XNetLogonGetExtendedStatus);
+ REX_EXPORT_STUB(__imp__XNetLogonGetFlowToken);
+ REX_EXPORT_STUB(__imp__XNetLogonGetLastUPnPStatus);
+ REX_EXPORT_STUB(__imp__XNetLogonGetLoggedOnUsers);
+-REX_EXPORT_STUB(__imp__XNetLogonGetMachineID);
+ REX_EXPORT_STUB(__imp__XNetLogonGetNatType);
+ REX_EXPORT_STUB(__imp__XNetLogonGetServiceInfo);
+ REX_EXPORT_STUB(__imp__XNetLogonGetServiceNetworkID);
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 455af0a..d18a89d 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -895,6 +895,63 @@ u32 NetDll_XNetQosListen_entry(u32 caller, mapped_void id, mapped_void data, u32
+   return OnlineFeature("qos") ? 0 : X_ERROR_FUNCTION_FAILED;
+ }
+ 
++// [online] XNetQosLookup: the game's QoS module (DirtySock QosApi) polls
++// XNQOS::info[0].flags for the COMPLETE bit and stays in "pending" forever if
++// the lookup never produces a result -- the old stub did not even write
++// *ppxnqos. Report every target (XNADDR peers and service IPs) as contacted
++// with a low ping and plenty of bandwidth, completed immediately.
++u32 NetDll_XNetQosLookup_entry(u32 caller, u32 cxna, mapped_void apxna, mapped_void apxnkid,
++                               mapped_void apxnkey, u32 cina, mapped_void aina,
++                               mapped_void adwServiceId, u32 cProbes, u32 dwBitsPerSec,
++                               u32 dwFlags, u32 hEvent, mapped_u32 ppxnqos) {
++  uint32_t count = cxna + cina;
++  if (count > 64) {
++    return X_ERROR_INVALID_PARAMETER;
++  }
++  uint32_t entries = count ? count : 1;
++  uint32_t size = 8 + entries * uint32_t(sizeof(XNQOSINFO));
++  auto qos_guest = REX_KERNEL_MEMORY()->SystemHeapAlloc(size);
++  auto qos = REX_KERNEL_MEMORY()->TranslateVirtual<XNQOS*>(qos_guest);
++  std::memset(qos, 0, size);
++  qos->count = count;
++  qos->count_pending = 0;
++  uint16_t probes = uint16_t(cProbes ? cProbes : 4);
++  for (uint32_t i = 0; i < count; ++i) {
++    XNQOSINFO& q = qos->info[i];
++    // XNET_XNQOSINFO_COMPLETE | XNET_XNQOSINFO_TARGET_CONTACTED
++    q.flags = OnlineFeature("qos") ? 0x03 : 0x05;  // offline: COMPLETE | TARGET_DISABLED
++    q.probes_xmit = probes;
++    q.probes_recv = OnlineFeature("qos") ? probes : 0;
++    q.data_len = 0;
++    q.data_ptr = 0;
++    q.rtt_min_in_msecs = 20;
++    q.rtt_med_in_msecs = 25;
++    q.up_bits_per_sec = 10000000;
++    q.down_bits_per_sec = 10000000;
++  }
++  if (ppxnqos) {
++    *ppxnqos = qos_guest;
++  }
++  REXKRNL_INFO("[online] XNetQosLookup: {} peer(s), {} server(s), {} probe(s) -> complete", cxna,
++               cina, probes);
++  if (hEvent) {
++    auto ev = REX_KERNEL_OBJECTS()->LookupObject<XEvent>(hEvent);
++    if (ev) {
++      ev->Set(0, false);
++    }
++  }
++  return 0;
++}
++
++// [online] Stable fake console id (was an unimplemented stub that left r3 and
++// the output untouched).
++u32 XNetLogonGetMachineID_entry(mapped_u64 machine_id) {
++  if (machine_id) {
++    *machine_id = 0xFA00000012345678ull;
++  }
++  return 0;
++}
++
+ u32 NetDll_inet_addr_entry(mapped_string addr_ptr) {
+   if (!addr_ptr) {
+     return -1;
+@@ -1588,7 +1645,8 @@ REX_EXPORT_STUB(__imp__NetDll_XNetGetSystemLinkPort);
+ REX_EXPORT_STUB(__imp__NetDll_XNetGetXnAddrPlatform);
+ REX_EXPORT_STUB(__imp__NetDll_XNetInAddrToServer);
+ REX_EXPORT_STUB(__imp__NetDll_XNetQosGetListenStats);
+-REX_EXPORT_STUB(__imp__NetDll_XNetQosLookup);
++REX_EXPORT(__imp__NetDll_XNetQosLookup, rex::kernel::xam::NetDll_XNetQosLookup_entry)
++REX_EXPORT(__imp__XNetLogonGetMachineID, rex::kernel::xam::XNetLogonGetMachineID_entry)
+ REX_EXPORT_STUB(__imp__NetDll_XNetRegisterKey);
+ REX_EXPORT_STUB(__imp__NetDll_XNetReplaceKey);
+ REX_EXPORT(__imp__NetDll_XNetServerToInAddr, rex::kernel::xam::NetDll_XNetServerToInAddr_entry)
+-- 
+2.43.0
+

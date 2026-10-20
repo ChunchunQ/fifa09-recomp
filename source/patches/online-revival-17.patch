@@ -1,0 +1,29 @@
+From 7aea206a5a2c4cbb78ae6512e1200ca5470dc256 Mon Sep 17 00:00:00 2001
+From: Chun <tanimlanamayanoyuncu@gmail.com>
+Date: Thu, 15 Oct 2026 17:55:28 +0300
+Subject: [PATCH] local: same-PC peer resolves to loopback
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LQoazeoBfEffqvK6NngMiX
+---
+ src/kernel/xam/xam_net.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/kernel/xam/xam_net.cpp b/src/kernel/xam/xam_net.cpp
+index 5922222..3f94708 100644
+--- a/src/kernel/xam/xam_net.cpp
++++ b/src/kernel/xam/xam_net.cpp
+@@ -971,6 +971,10 @@ u32 NetDll_XNetXnAddrToInAddr_entry(u32 caller, ppc_ptr_t<XNADDR> xn_addr, mappe
+     std::memcpy(&peer, &xn_addr->inaOnline, 4);
+     if (!peer) std::memcpy(&peer, &xn_addr->ina, 4);
+     if (peer) {
++      // [online] A peer on this same PC (second test instance): use loopback,
++      // the address the lobby hands out for it, so every part of the game
++      // (game link, tunnel/voice) sees the peer at one consistent address.
++      if (peer == CachedLocalIPv4NBO()) peer = htonl(INADDR_LOOPBACK);
+       if (in_addr) std::memcpy(in_addr.host_address(), &peer, 4);
+       const uint8_t* pb = reinterpret_cast<const uint8_t*>(&peer);
+       REXKRNL_INFO("[online] XNetXnAddrToInAddr -> peer {}.{}.{}.{}", pb[0], pb[1], pb[2], pb[3]);
+-- 
+2.43.0
+

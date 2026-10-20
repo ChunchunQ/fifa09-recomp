@@ -1,0 +1,28 @@
+diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
+index a744375..7c9eae0 100644
+--- a/src/graphics/command_processor.cpp
++++ b/src/graphics/command_processor.cpp
+@@ -1370,7 +1370,22 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+ 
+   if (draw_succeeded) {
+     auto viz_query = register_file_->Get<reg::PA_SC_VIZ_QUERY>();
+-    if (!(viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z)) {
++    bool viz_query_kills_pixels = viz_query.viz_query_ena && viz_query.kill_pix_post_hi_z;
++    // A resolve (EDRAM copy mode) does not shade pixels, so the visibility
++    // query pixel kill does not apply to it. Dropping it leaves the
++    // destination (for example the front buffer) stale, which shows up as a
++    // black screen in games that keep an occlusion query open across the
++    // resolve (FIFA 09 floodlight flares).
++    bool is_resolve =
++        register_file_->Get<reg::RB_MODECONTROL>().edram_mode == xenos::EdramMode::kCopy;
++    if (viz_query_kills_pixels && is_resolve) {
++      static bool logged = false;
++      if (!logged) {
++        logged = true;
++        REXGPU_WARN("Resolve issued while a visibility query kills pixels; executing it anyway");
++      }
++    }
++    if (!viz_query_kills_pixels || is_resolve) {
+       // TODO(Triang3l): Don't drop the draw call completely if the vertex
+       // shader has memexport.
+       // TODO(Triang3l || JoelLinn): Handle this properly in the render

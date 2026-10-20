@@ -1,0 +1,19 @@
+--- a/nobk_source/server/fifa09_server.py
++++ b/nobk_source/server/fifa09_server.py
+@@ -752,9 +752,13 @@
+                     g.platparams = f["PLATPARAMS"]
+                 for p in g.players:
+                     p.send("+mgm", self.game_info(g))
+-                # The joiner reads SESS from +ses; it got the first one before the
+-                # host's session existed, so send it again now.
+-                if new_sess and g.started:
++                # The joiner reads SESS from +ses. In Online Team Play the host
++                # creates its Xbox session while the lobby is still open (g.started
++                # remains False), so the first +ses sent by join_game can contain an
++                # empty SESS. Republish the session to non-host members as soon as
++                # gset supplies it; otherwise the joiner never learns the host's
++                # session ID and cannot complete the session join.
++                if new_sess and (g.started or g.max > 2):
+                     for p in g.players:
+                         if p is not g.host:
+                             p.send("+ses", self.game_info(g))

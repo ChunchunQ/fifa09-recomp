@@ -1,0 +1,41 @@
+diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
+index 953c5fd..91d1edd 100644
+--- a/src/graphics/pipeline/render_target/cache.cpp
++++ b/src/graphics/pipeline/render_target/cache.cpp
+@@ -37,6 +37,12 @@ REXCVAR_DEFINE_BOOL(execute_unclipped_draw_vs_on_cpu_for_psi_render_backend, tru
+ REXCVAR_DEFINE_BOOL(snorm16_render_target_full_range, true, "GPU",
+                     "Use full range for SNORM16 render targets");
+ 
++REXCVAR_DEFINE_BOOL(edram_ownership_no_wrap, false, "GPU",
++                    "Do not let a render target's estimated EDRAM range wrap around the end of "
++                    "the EDRAM and claim the tiles at its start (workaround for titles whose "
++                    "depth pass would otherwise take over a color buffer at tile 0 before it "
++                    "is resolved)");
++
+ REXCVAR_DEFINE_BOOL(direct_host_resolve, true, "GPU",
+                     "Resolve from host render targets directly to shared memory when possible")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -656,6 +662,23 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+                                         ? edram_bases_sorted[i + 1].first
+                                         : (xenos::kEdramTileCount + edram_bases_sorted[0].first)) -
+                                        rt_base);
++    uint32_t rt_end_tiles = rt_base + rt_lengths_tiles[i];
++    if (rt_end_tiles > xenos::kEdramTileCount) {
++      static uint32_t wrap_logs = 0;
++      if (wrap_logs < 30) {
++        ++wrap_logs;
++        REXGPU_WARN(
++            "EdramWrap: {} RT at {}t (pitch {}t, {}x MSAA, height {}) claims {} tiles, wrapping "
++            "over tiles 0..{}{}",
++            rt_key.is_depth ? "depth" : "color", rt_base, pitch_tiles_at_32bpp,
++            1u << uint32_t(msaa_samples), height_used, rt_lengths_tiles[i],
++            rt_end_tiles - xenos::kEdramTileCount - 1,
++            REXCVAR_GET(edram_ownership_no_wrap) ? " - clamped" : "");
++      }
++      if (REXCVAR_GET(edram_ownership_no_wrap)) {
++        rt_lengths_tiles[i] = xenos::kEdramTileCount - rt_base;
++      }
++    }
+   }
+ 
+   if (interlock_barrier_only) {
