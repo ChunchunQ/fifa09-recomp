@@ -2,20 +2,17 @@
 
 # FIFA 09 PC
 
-[![Latest release](https://img.shields.io/github/v/release/ChunchunQ/fifa09-recomp?label=latest%20release)](../../releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/ChunchunQ/fifa09-recomp/total)](../../releases)
+[![Latest release](https://img.shields.io/github/v/release/ChunchunQ/fifa09-recomp?label=latest%20release)](https://github.com/ChunchunQ/fifa09-recomp/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/ChunchunQ/fifa09-recomp/total)](https://github.com/ChunchunQ/fifa09-recomp/releases)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
 
 ### EA Sports FIFA 09 on PC, running natively, with a modern launcher and its online modes back.
 
-**[⬇ Download for Windows x64](../../releases/latest)**
+**[⬇ Download for Windows x64](https://github.com/ChunchunQ/fifa09-recomp/releases/latest)**
 
 The Xbox 360 game code is translated to native PC code with the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk).
 Online play runs on the free [NOBK.Online](https://nobkonline.com) servers.
 **No game files are included:** you need your own Xbox 360 copy of FIFA 09.
-
-> [!NOTE]
-> **Türkçe:** Kurulum rehberinin Türkçesi [docs/INSTALL.md](docs/INSTALL.md) dosyasında. Online hesap: [nobkonline.com](https://nobkonline.com/tr/register/).
 
 ## Highlights
 
@@ -60,13 +57,13 @@ The launcher's **Files → Verify game files** does the same check for you.
 **Requirements:** Windows 10 or 11 (64-bit), a DirectX 12 graphics card, a controller or keyboard + mouse,
 and the game folder from your own FIFA 09 Xbox 360 disc (`default.xex`, `data0.big` … `data6.big`, `audiodata\`, `data\`).
 
-1. Download `NOBK-FIFA09-<version>.zip` from the [latest release](../../releases/latest) and extract it, e.g. to `C:\Games\FIFA09`
+1. Download `NOBK-FIFA09-<version>.zip` from the [latest release](https://github.com/ChunchunQ/fifa09-recomp/releases/latest) and extract it, e.g. to `C:\Games\FIFA09`
    (not `Program Files`, OneDrive or the Desktop).
 2. Copy your game files into the `Game\` folder, so that `Game\default.xex` exists.
 3. Start **`FIFA09 Launcher.exe`**. If Windows says "Windows protected your PC": **More info → Run anyway** (the launcher is not code-signed).
 4. **Files → Verify game files**, sign in on **Online**, press **PLAY**.
 
-Full guide with launcher settings and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md#english).
+Full guide with launcher settings and troubleshooting: [docs/INSTALL.md](docs/INSTALL.md).
 The launcher updates itself; your settings and sign-in are kept.
 
 ## Known issues
