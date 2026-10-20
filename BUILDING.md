@@ -1,6 +1,6 @@
-# Source
+# Building from source
 
-The code written for the FIFA 09 PC port. MIT licensed (see [../LICENSE](../LICENSE)).
+The code written for the FIFA 09 PC port. MIT licensed (see [LICENSE](LICENSE)).
 
 | Folder | What |
 |---|---|

@@ -91,8 +91,8 @@ Found a bug? Press **Files → Send log** in the launcher, or open a ticket at
 
 ## Source code
 
-The code written for this port (game hooks, launcher, SDK patches, tools) is in [`source/`](source/), under the MIT license.
-Build steps: [source/README.md](source/README.md). The game itself and the code generated from it are not included.
+The code written for this port (game hooks, launcher, SDK patches, tools) is in this repository (`game/`, `launcher/`, `patches/`, `tools/`), under the [MIT license](LICENSE).
+Build steps: [BUILDING.md](BUILDING.md). The game itself and the code generated from it are not included.
 
 ## Credits
 

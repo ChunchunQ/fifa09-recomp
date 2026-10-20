@@ -1,3 +1,34 @@
 Thumbs.db
 .DS_Store
 *.zip
+# Never commit game content (EA-derived) or private data.
+*.xex
+*.xexp
+*.big
+*.db
+*.sqlite
+*.log
+*.logm
+*.bak
+*.bak_*
+launcher.json
+discord_webhook
+mail_key
+players.json
+teams.json
+stadiums.json
+faces/
+crests/
+# game data folders of the port (only at game/, never the site or launcher assets)
+/game/Game/
+/game/assets/
+/game/mods/
+dist/
+out/
+bin/
+obj/
+generated/
+__pycache__/
+launcher/background*.png
+launcher/background*.jpg
+launcher/logo.png

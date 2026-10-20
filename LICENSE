@@ -21,11 +21,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ---------------------------------------------------------------------------
-This license covers the code in source/ written for this project. It does not
+This license covers the code in this repository written for this project. It does not
 cover FIFA 09 or any of its content, which belong to Electronic Arts.
 
-The patches in source/patches/ modify the ReXGlue SDK
+The patches in patches/ modify the ReXGlue SDK
 (https://github.com/rexglue/rexglue-sdk), Copyright (c) 2026 Tom Clay, with
 portions derived from the Xenia project, Copyright (c) 2022 Ben Vanik and Xenia
 project contributors. Those parts stay under the ReXGlue SDK's own license.
-The flag images in source/launcher/Assets/flags/ come with their own LICENSE.txt.
+The flag images in launcher/Assets/flags/ come with their own LICENSE.txt.
